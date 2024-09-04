@@ -240,10 +240,10 @@ def _new_session(user_state):
 
 def _on_user_change(user_state, username):
     sessions = database.get_active_session_ids(username)
-    value = sessions[0] if sessions else None
     user_state['config']['configurable']["email"] = username
-    user_state['config']['configurable']["thread_id"] = value
-    return user_state, gr.Radio(choices = sessions, value=value)
+    if not sessions:
+        return _new_session(user_state)
+    return user_state, gr.Radio(choices = sessions, value=sessions[0])
 
 def _on_session_change(user_state, session_id):
     user_state['config']['configurable']["thread_id"] = session_id
@@ -254,7 +254,6 @@ def _on_session_change(user_state, session_id):
 
 def _send_message(user_state, message, history):
     config = user_state['config']
-
     human_message = HumanMessage(message)
     history.extend(_lc_to_gr_msgs([human_message]))
     yield user_state, "", history
@@ -297,7 +296,7 @@ with gr.Blocks() as demo:
         with gr.Column():
             username = gr.Text('angela',label='username')
             session_id = gr.Radio(label='session')
-            new_session_button = gr.Button('New Session')
+            new_session_button = gr.Button('New Session', size='sm')
             # model = gr.Dropdown(['chatgpt-3.5', 'chatgpt-4o'],value='chatgpt-3.5',label='model')
             # debugging stuff
         with gr.Column(scale=4):
