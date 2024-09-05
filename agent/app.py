@@ -48,12 +48,23 @@ def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
             gr_msgs.extend([gr.ChatMessage(role="user",content=content) for content in contents])
         elif isinstance(msg, AIMessage):
             if msg.tool_calls:
-                tool_name = msg.tool_calls[0]['name']
-                gr_msgs.append(gr.ChatMessage(role="assistant",content=json.dumps(msg.tool_calls), metadata={'title':f"Request: {tool_name}"}))
+                tool_call = msg.tool_calls[0] # assume single tool call
+                content = "\n".join([f"{k}={v}" for k,v in tool_call['args'].items()])
+                gr_msgs.append(gr.ChatMessage(role="assistant",content=content, metadata={'title':f"Request: {tool_call['name']}"}))
             else:
                 gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content))
         elif isinstance(msg, ToolMessage):
             gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content, metadata={'title': f"Results: {msg.name}"}))
+            if msg.name == 'generate_text_image':
+                # customise how we display this
+                encoded_image = json.loads(msg.content)['image']
+                image_data = base64.b64decode(encoded_image)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+                    temp_file.write(image_data)
+                    content = {"path":temp_file.name}
+                gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
+            else:
+                pass
         elif isinstance(msg, SystemMessage):
             ...
     return gr_msgs
@@ -79,12 +90,6 @@ def _on_user_change(user_state, username):
         return _new_session(user_state)
     return user_state, gr.Radio(choices = sessions, value=sessions[0])
 
-def _on_session_change(user_state, session_id):
-    user_state['config']['configurable']["thread_id"] = session_id
-    config = user_state['config']
-    msgs = graph.get_state(config).values.get('messages', [])
-    history = _lc_to_gr_msgs(msgs)
-    return user_state, history
 
 
 def _update_configurable(user_state, key, value):
@@ -96,7 +101,7 @@ def _update_configurable(user_state, key, value):
     return user_state
 
 def _human_tool_input(snapshot, message):
-    if message.lower().strip() == 'ok':
+    if message.lower().strip() in ['ok','y','1']:
         return None
     else:
         tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
@@ -109,6 +114,28 @@ def _human_tool_input(snapshot, message):
                     )
                 ]
             }
+
+def _update_sources(user_state):
+    collection_name = user_state['config']['configurable']["thread_id"]
+    sources = vector_db.get_sources(collection_name)
+    if sources:
+        title = "These are in your database:"
+        return "\n".join([title] + [f" - {source}" for source in sources])
+    else:
+        return "Nothing here"
+
+def _add_to_user_db(user_state, path):
+    collection_name = user_state['config']['configurable']["thread_id"]
+    vector_db.add(collection_name, path)
+    return user_state, None, _update_sources(user_state)
+
+def _on_session_change(user_state, session_id):
+    user_state['config']['configurable']["thread_id"] = session_id
+    config = user_state['config']
+    msgs = graph.get_state(config).values.get('messages', [])
+    history = _lc_to_gr_msgs(msgs)
+    sources = _update_sources(user_state)
+    return user_state, history, sources
 
 def _send_message(user_state, message, images, history):
     config = user_state['config']
@@ -140,14 +167,40 @@ def _send_message(user_state, message, images, history):
         graph_input = {"messages": messages}
     
     events = graph.stream(graph_input, config, stream_mode="values")
+    messages = []
     for event in events:
         messages = event.get('messages')
         if not messages:
             continue
         if not isinstance(messages, list):
             messages = [messages]
-        yield user_state, gr.update(), gr.update(), _lc_to_gr_msgs(messages)
+        history = _lc_to_gr_msgs(messages)
+        yield user_state, gr.update(), gr.update(), history
+    # for better UI, if last message is a tool call to 'human', ask
+    if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+        history.append(gr.ChatMessage(role="assistant",
+        content="⚠️ I would like to use this tool. Reply 'ok' to continue or reply with a reason why not.⚠️"))
+        yield user_state, gr.update(), gr.update(), history
     return
+
+def _send_default_message(user_state, message, history):
+    for us, _, _, history in _send_message(user_state, message, [], history):
+        yield us, history
+    return
+    try:
+        key = 'tools/ask_human'
+        original_config_ask_human = user_state['config']['configurable'].get(key)
+        user_state['config']['configurable'][key] = False
+        for us, _, _, history in _send_message(user_state, message, [], history):
+            yield us, history
+    finally:
+        if original_config_ask_human is None and key in us['config']['configurable']:
+            del user_state['config']['configurable'][key]
+        else:
+            us['config']['configurable'][key]=original_config_ask_human
+        yield us, gr.update()
+
+
 import json
 
 session_db.initialise_database()
@@ -159,6 +212,8 @@ default_configurable = {
     'llm/temperature': 1,
     'tools/ask_human': True,
     }
+
+default_prompts = ['ok','improve answer by referenceing my database.','improve answer by including realtime intranet content.']
 with gr.Blocks() as demo:
     user_state = gr.State(lambda: {'config':{'configurable':default_configurable.copy()}})
     with gr.Row():
@@ -172,8 +227,7 @@ with gr.Blocks() as demo:
                 with gr.Tab("Image"):
                     images = gr.Gallery(type='filepath', format='png')
                 with gr.Tab("My Database"):
-                    refresh_sources_button = gr.Button('pull latest', size='sm')
-                    sources = gr.Text(label='uploaded files', interactive=False)
+                    sources = gr.Markdown()
                     upload_file_button = gr.UploadButton(size='sm')
                     url = gr.Text(container=False, placeholder='Add website to your database')
             with gr.Accordion("Advanced Options", open=False):
@@ -184,29 +238,36 @@ with gr.Blocks() as demo:
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")
             message = gr.Text(placeholder='enter message', container=False)
+            with gr.Row():
+                default_prompt_buttons = [
+                    gr.Button(prompt, size='sm')
+                for prompt in default_prompts]
+                    
 
     # events 
     gr.on(fn=_on_user_change, triggers=[demo.load, username.submit], inputs=[user_state, username], outputs=[user_state, session_id])
-    session_id.change(fn=_on_session_change, inputs=[user_state, session_id], outputs=[user_state, chatbot])
+    session_id.change(fn=_on_session_change, inputs=[user_state, session_id], outputs=[user_state, chatbot, sources])
     new_session_button.click(fn=_new_session, inputs=[user_state], outputs=[user_state, session_id])
     clear_sessions_button.click(fn=_clear_sessions, inputs=[user_state], outputs=[user_state, session_id])
     model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
     temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
     ask_human.input(fn=lambda us, v:_update_configurable(us, 'llm/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
 
-    def _add_to_user_db(user_state, path):
-        collection_name = user_state['config']['configurable']["thread_id"]
-        vector_db.add(collection_name, path)
-        sources = "\n".join(vector_db.get_sources(collection_name))
-        return user_state, None, sources
+
     upload_file_button.upload(_add_to_user_db, [user_state, upload_file_button], [user_state, upload_file_button, sources])
     url.submit(_add_to_user_db, [user_state, url], [user_state, url, sources])
-    refresh_sources_button.click(lambda us:  "\n".join(vector_db.get_sources(us['config']['configurable']["thread_id"])), [user_state], [sources])
 
+    # sending messages
     message.submit(
         fn=_send_message, 
         inputs=[user_state, message, images, chatbot],
         outputs=[user_state, message, images, chatbot],
+        )
+    for btn in default_prompt_buttons:
+        btn.click(
+            _send_default_message,
+            inputs=[user_state, btn, chatbot],
+            outputs=[user_state, chatbot],
         )
 
     # debug stuff
