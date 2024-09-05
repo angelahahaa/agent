@@ -2,3 +2,5 @@
 .vscode
 temp*.py
 __pycache__
+*.db
+*.sqlite*
