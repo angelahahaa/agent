@@ -12,7 +12,7 @@ import gradio as gr
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
                                      SystemMessage, ToolMessage)
 
-from agent import session_db
+from agent import session_db, vector_db
 # == agent
 from agent.chatbot import graph
 
@@ -171,8 +171,11 @@ with gr.Blocks() as demo:
             with gr.Tabs():
                 with gr.Tab("Image"):
                     images = gr.Gallery(type='filepath', format='png')
-                # with gr.Tab("My Database"):
-                #     files = gr.Files()
+                with gr.Tab("My Database"):
+                    refresh_sources_button = gr.Button('pull latest', size='sm')
+                    sources = gr.Text(label='uploaded files', interactive=False)
+                    upload_file_button = gr.UploadButton(size='sm')
+                    url = gr.Text(container=False, placeholder='Add website to your database')
             with gr.Accordion("Advanced Options", open=False):
                 model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
                 temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
@@ -190,6 +193,15 @@ with gr.Blocks() as demo:
     model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
     temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
     ask_human.input(fn=lambda us, v:_update_configurable(us, 'llm/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
+
+    def _add_to_user_db(user_state, path):
+        collection_name = user_state['config']['configurable']["thread_id"]
+        vector_db.add(collection_name, path)
+        sources = "\n".join(vector_db.get_sources(collection_name))
+        return user_state, None, sources
+    upload_file_button.upload(_add_to_user_db, [user_state, upload_file_button], [user_state, upload_file_button, sources])
+    url.submit(_add_to_user_db, [user_state, url], [user_state, url, sources])
+    refresh_sources_button.click(lambda us:  "\n".join(vector_db.get_sources(us['config']['configurable']["thread_id"])), [user_state], [sources])
 
     message.submit(
         fn=_send_message, 

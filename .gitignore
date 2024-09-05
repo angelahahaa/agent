@@ -4,3 +4,4 @@ temp*.py
 __pycache__
 *.db
 *.sqlite*
+databases/*
