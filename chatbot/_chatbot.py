@@ -17,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
-from agent import vector_db
+from chatbot.database import vector_db
 
 def handle_tool_error(state) -> dict:
     error = state.get("error")

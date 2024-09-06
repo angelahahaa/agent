@@ -1,5 +1,7 @@
 import dotenv
 
+from chatbot.database import session_db
+
 dotenv.load_dotenv('.env')
 
 import base64
@@ -12,9 +14,10 @@ import gradio as gr
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
                                      SystemMessage, ToolMessage)
 
-from agent import session_db, vector_db
+from chatbot.database import vector_db
 # == agent
-from agent.chatbot import graph
+from chatbot.agent.primary import get_graph
+graph = get_graph()
 
 # == file upload
 
