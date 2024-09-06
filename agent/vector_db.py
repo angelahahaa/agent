@@ -3,7 +3,7 @@ import dotenv
 dotenv.load_dotenv('.env')
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import WebBaseLoader, TextLoader
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 import os
 DATABASE_URL='databases/vector_db'
