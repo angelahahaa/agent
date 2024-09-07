@@ -44,6 +44,6 @@ def get_database_info(collection_name):
 
 if __name__ == '__main__':
     collection_name = 'test'
-    add(collection_name, r'D:\dev\ai-suite\virtuosgpt-orch\tests\resources\limei.py')
+    # add(collection_name, r'D:\dev\ai-suite\virtuosgpt-orch\tests\resources\limei.py')
     add(collection_name, 'https://langchain-ai.github.io/langgraph/how-tos/configuration/#base')
     print(get_database_info(collection_name))

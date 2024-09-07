@@ -709,13 +709,13 @@ files = [
 
 [[package]]
 name = "fastapi"
-version = "0.113.0"
+version = "0.112.4"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
 optional = false
 python-versions = ">=3.8"
 files = [
-    {file = "fastapi-0.113.0-py3-none-any.whl", hash = "sha256:c8d364485b6361fb643d53920a18d58a696e189abcb901ec03b487e35774c476"},
-    {file = "fastapi-0.113.0.tar.gz", hash = "sha256:b7cf9684dc154dfc93f8b718e5850577b529889096518df44defa41e73caf50f"},
+    {file = "fastapi-0.112.4-py3-none-any.whl", hash = "sha256:6d4f9c3301825d4620665cace8e2bc34e303f61c05a5382d1d61a048ea7f2f37"},
+    {file = "fastapi-0.112.4.tar.gz", hash = "sha256:b1f72e1f72afe7902ccd639ba320abb5d57a309804f45c10ab0ce3693cadeb33"},
 ]
 
 [package.dependencies]
@@ -997,19 +997,19 @@ grpc = ["grpcio (>=1.44.0,<2.0.0.dev0)"]
 
 [[package]]
 name = "gradio"
-version = "4.42.0"
+version = "4.43.0"
 description = "Python library for easily interacting with trained machine learning models"
 optional = false
 python-versions = ">=3.8"
 files = [
-    {file = "gradio-4.42.0-py3-none-any.whl", hash = "sha256:fe97d5e99e7e26eb37b925f25b1c8f5aea3e6a23ed1ed4409ee4e306ce2fc58a"},
-    {file = "gradio-4.42.0.tar.gz", hash = "sha256:a64a8815b284d9fb0ffafe287dfb307c2044f530386fd7ab72fde985a268fd0c"},
+    {file = "gradio-4.43.0-py3-none-any.whl", hash = "sha256:a8a785af95b7985d1d17287b1f79add3c913ed79180c4b89ef30cea375329bb9"},
+    {file = "gradio-4.43.0.tar.gz", hash = "sha256:0d510e98b7fcb5d829fdc9452dcfef9f060c86130c9e85a539b9e709ba460823"},
 ]
 
 [package.dependencies]
 aiofiles = ">=22.0,<24.0"
 anyio = ">=3.0,<5.0"
-fastapi = "*"
+fastapi = "<0.113.0"
 ffmpy = "*"
 gradio-client = "1.3.0"
 httpx = ">=0.24.1"
@@ -4318,4 +4318,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "ffc2aa0b971c634566a80046f04b364ee5a899bcc45fda1c096af185327eb6f7"
+content-hash = "e6bbab7a6d637a9000018b19411de5be6ab189c0aa7742a3634d6e989e12c534"

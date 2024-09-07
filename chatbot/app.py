@@ -16,8 +16,14 @@ from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
 
 from chatbot.database import vector_db
 # == agent
-from chatbot.agent.primary import get_graph
-graph = get_graph()
+from chatbot.agent.mock_multiagent import get_builder, ai_names, TOOL_NAMES
+from langgraph.checkpoint.memory import MemorySaver
+builder = get_builder()
+memory = MemorySaver()
+graph = get_builder().compile(
+    checkpointer=memory, 
+    interrupt_before=[f'{name}_tools' for name in ai_names],
+    )
 
 # == file upload
 
@@ -142,6 +148,7 @@ def _on_session_change(user_state, session_id):
 
 def _send_message(user_state, message, images, history):
     config = user_state['config']
+    ask = user_state.get('ask') or []
     messages = []
     if not images and not message:
         gr.Warning('Nothing to send')
@@ -163,27 +170,37 @@ def _send_message(user_state, message, images, history):
     yield user_state, "", None, history
 
     snapshot = graph.get_state(config)
-    if "human" in snapshot.next:
+    if snapshot.next:
         # langchain expecting Human's confirmation (or deny)
         graph_input = _human_tool_input(snapshot, message)
     else:
         graph_input = {"messages": messages}
     
-    events = graph.stream(graph_input, config, stream_mode="values")
-    messages = []
-    for event in events:
-        messages = event.get('messages')
-        if not messages:
-            continue
-        if not isinstance(messages, list):
-            messages = [messages]
-        history = _lc_to_gr_msgs(messages)
-        yield user_state, gr.update(), gr.update(), history
-    # for better UI, if last message is a tool call to 'human', ask
-    if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-        history.append(gr.ChatMessage(role="assistant",
-        content="⚠️ I would like to use this tool. Reply 'ok' to continue or reply with a reason why not.⚠️"))
-        yield user_state, gr.update(), gr.update(), history
+    for _ in range(10): # max 10 interactions before we get angry
+        events = graph.stream(graph_input, config, stream_mode="values")
+        messages = []
+        for event in events:
+            messages = event.get('messages')
+            if not messages:
+                continue
+            if not isinstance(messages, list):
+                messages = [messages]
+            history = _lc_to_gr_msgs(messages)
+            yield user_state, gr.update(), gr.update(), history
+        if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+            # conversation is not complete, AI waiting for confirmation
+            tool_name = messages[-1].tool_calls[0]['name'] # assume single tool call only
+            if ask and tool_name in set(ask):
+                # ask human and this interactio
+                history.append(gr.ChatMessage(role="assistant",
+                content="⚠️ I would like to use this tool. Reply 'ok' to continue or reply with a reason why not.⚠️"))
+                yield user_state, gr.update(), gr.update(), history
+                break
+            else:
+                # continue without asking
+                graph_input = None
+                continue
+        break
     return
 
 def _send_default_message(user_state, message, history):
@@ -213,7 +230,6 @@ default_configurable = {
     # 'llm/model_name': 'gpt-4o',
     'llm/model_name': 'gpt-3.5-turbo',
     'llm/temperature': 1,
-    'tools/ask_human': True,
     }
 
 default_prompts = ['ok','improve answer by referenceing my database.','improve answer by including realtime intranet content.']
@@ -236,7 +252,8 @@ with gr.Blocks() as demo:
             with gr.Accordion("Advanced Options", open=False):
                 model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
                 temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
-                ask_human = gr.Checkbox(value=default_configurable['tools/ask_human'], label='ask_human')
+                # ask_human = gr.Checkbox(value=default_configurable['tools/ask_human'], label='ask_human')
+                ask_tools = gr.CheckboxGroup(choices=sorted(list(TOOL_NAMES)), label='Ask before using these tools')
             # debugging stuff
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")
@@ -254,7 +271,8 @@ with gr.Blocks() as demo:
     clear_sessions_button.click(fn=_clear_sessions, inputs=[user_state], outputs=[user_state, session_id])
     model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
     temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
-    ask_human.input(fn=lambda us, v:_update_configurable(us, 'llm/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
+    ask_tools.change(fn=lambda us, v:{**us, 'ask':v}, inputs=[user_state, ask_tools], outputs=[user_state])
+    # ask_human.input(fn=lambda us, v:_update_configurable(us, 'tools/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
 
 
     upload_file_button.upload(_add_to_user_db, [user_state, upload_file_button], [user_state, upload_file_button, sources])
@@ -283,4 +301,5 @@ with gr.Blocks() as demo:
     @graph_state_btn.click(inputs=[user_state], outputs=[console])
     def _fn(user_state):
         return json.dumps(graph.get_state(user_state['config']), indent=2, default=str)
-demo.launch()
+if __name__ == '__main__':
+    demo.launch()

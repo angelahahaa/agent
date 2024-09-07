@@ -61,3 +61,6 @@ def update_last_modified(session_id):
         if user_session:
             user_session.last_modified = func.now()
             session.commit()
+
+if __name__ == '__main__':
+    print(get_sessions("angela"))

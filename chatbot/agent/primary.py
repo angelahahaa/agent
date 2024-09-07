@@ -208,8 +208,8 @@ if __name__ == '__main__':
     config = {"configurable":{"thread_id":str(uuid4())}}
     msgs = [
         HumanMessage(content="Tell me about qingyi"),
-        HumanMessage(content="用中文"),
-        HumanMessage(content="写一段关于她的小说吧。"),
+        # HumanMessage(content="用中文"),
+        # HumanMessage(content="写一段关于她的小说吧。"),
     ]
     while True: 
         if msgs:
