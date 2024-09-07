@@ -16,14 +16,7 @@ from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
 
 from chatbot.database import vector_db
 # == agent
-from chatbot.agent.mock_multiagent import get_builder, ai_names, TOOL_NAMES
-from langgraph.checkpoint.memory import MemorySaver
-builder = get_builder()
-memory = MemorySaver()
-graph = get_builder().compile(
-    checkpointer=memory, 
-    interrupt_before=[f'{name}_tools' for name in ai_names],
-    )
+from chatbot.agent.combined import graph, tool_names
 
 # == file upload
 
@@ -64,9 +57,9 @@ def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
                 gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content))
         elif isinstance(msg, ToolMessage):
             gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content, metadata={'title': f"Results: {msg.name}"}))
-            if msg.name == 'generate_text_image':
+            if msg.name == 'generate_image_with_text':
                 # customise how we display this
-                encoded_image = json.loads(msg.content)['image']
+                encoded_image = msg.artifact['image']
                 image_data = base64.b64decode(encoded_image)
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
                     temp_file.write(image_data)
@@ -170,7 +163,7 @@ def _send_message(user_state, message, images, history):
     yield user_state, "", None, history
 
     snapshot = graph.get_state(config)
-    if snapshot.next:
+    if snapshot.next and 'tool' in snapshot.next[0]:
         # langchain expecting Human's confirmation (or deny)
         graph_input = _human_tool_input(snapshot, message)
     else:
@@ -253,7 +246,7 @@ with gr.Blocks() as demo:
                 model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
                 temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
                 # ask_human = gr.Checkbox(value=default_configurable['tools/ask_human'], label='ask_human')
-                ask_tools = gr.CheckboxGroup(choices=sorted(list(TOOL_NAMES)), label='Ask before using these tools')
+                ask_tools = gr.CheckboxGroup(choices=sorted(list(tool_names)), label='Ask before using these tools')
             # debugging stuff
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")
