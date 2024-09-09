@@ -64,7 +64,8 @@ class PrimaryAI(AINode):
             )
             | self.llm.with_config(config).bind_tools(self.tools) 
             )
-        return {"messages": runnable.invoke(state)}
+        messages = runnable.invoke(state)
+        return {"messages": messages}
     def switch_ai_tool(self):
         @tool(response_format='content_and_artifact', parse_docstring=True)
         def switch_to_primary_ai(
