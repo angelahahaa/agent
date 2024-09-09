@@ -1,3 +1,4 @@
+from typing import List, Set, TypedDict
 import dotenv
 
 dotenv.load_dotenv('.env')
@@ -33,11 +34,13 @@ def add(collection_name:str, path:str):
             d.metadata['source'] = os.path.basename(path)
     vector_store(collection_name=collection_name).add_documents(docs)
 
-def get_sources(collection_name):
+def get_sources(collection_name) -> Set[str]:
     metadatas = vector_store(collection_name).get(include=['metadatas'])['metadatas']
     return set([m['source'] for m in metadatas])
 
-def get_database_info(collection_name):
+class DatabaseInfo(TypedDict):
+    data_source:List[str]
+def get_database_info(collection_name) -> DatabaseInfo:
     return {
         "data_source":list(get_sources(collection_name))
     }

@@ -1,298 +1,277 @@
 import dotenv
 
-from chatbot.database import session_db
-
 dotenv.load_dotenv('.env')
 
-import base64
-import tempfile
-# exit()
-import uuid
-from typing import List
+import logging
+from typing import Annotated, NotRequired
+from uuid import uuid4
 
-import gradio as gr
-from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
-                                     SystemMessage, ToolMessage)
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
 
-from chatbot.database import vector_db
-# == agent
-from chatbot.agent.combined import graph, tool_names
+logger = logging.getLogger()
+import os
+from datetime import datetime
+from typing import Annotated
 
-# == file upload
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import (ConfigurableField, RunnableConfig,
+                                      RunnablePassthrough)
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
 
-
-
-
-def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
-    gr_msgs = []
-    for msg in lc_msgs:
-        if isinstance(msg, HumanMessage):
-            contents = []
-            if isinstance(msg.content, str):
-                contents.append(msg.content)
-            elif isinstance(msg.content, list):
-                for c in msg.content:
-                    if isinstance(c, str):
-                        contents.append(c)
-                    elif isinstance(c, dict):
-                        if c.get("type") == 'text':
-                            contents.append(c.get("text"))
-                        elif c.get("type") == 'image_url':
-                            # assume it is always image bytes
-                            encoded_image = c["image_url"]['url'].split(",")[1]
-                            image_data = base64.b64decode(encoded_image)
-
-                            # Write the image data to a temporary file
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
-                                temp_file.write(image_data)
-                                contents.append({"path":temp_file.name})
-                            
-            gr_msgs.extend([gr.ChatMessage(role="user",content=content) for content in contents])
-        elif isinstance(msg, AIMessage):
-            if msg.tool_calls:
-                tool_call = msg.tool_calls[0] # assume single tool call
-                content = "\n".join([f"{k}={v}" for k,v in tool_call['args'].items()])
-                gr_msgs.append(gr.ChatMessage(role="assistant",content=content, metadata={'title':f"Request: {tool_call['name']}"}))
-            else:
-                gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content))
-        elif isinstance(msg, ToolMessage):
-            gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content, metadata={'title': f"Results: {msg.name}"}))
-            if msg.name == 'generate_image_with_text':
-                # customise how we display this
-                encoded_image = msg.artifact['image']
-                image_data = base64.b64decode(encoded_image)
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
-                    temp_file.write(image_data)
-                    content = {"path":temp_file.name}
-                gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
-            else:
-                pass
-        elif isinstance(msg, SystemMessage):
-            ...
-    return gr_msgs
-
-def _new_session(user_state):
-    new_session_id = str(uuid.uuid4())
-    username = user_state['config']['configurable']["email"]
-    session_db.add(session_id=new_session_id, username=username)
-    sessions = session_db.get_sessions(username)
-    return user_state, gr.Radio(choices = sessions, value=sessions[0])
-
-def _clear_sessions(user_state):
-    username = user_state['config']['configurable']["email"]
-    sessions = session_db.get_sessions(username)
-    for session in sessions:
-        session_db.archive(session)
-    return _new_session(user_state)
-
-def _on_user_change(user_state, username):
-    sessions = session_db.get_sessions(username)
-    user_state['config']['configurable']["email"] = username
-    if not sessions:
-        return _new_session(user_state)
-    return user_state, gr.Radio(choices = sessions, value=sessions[0])
+from chatbot import tools
+from chatbot.multiagent import AINode, State, create_multiagent_graph
 
 
 
-def _update_configurable(user_state, key, value):
-    configurable = user_state['config']['configurable']
-    if value:
-        configurable[key] = value
-    elif key in configurable:
-        del configurable[key]
-    return user_state
 
-def _human_tool_input(snapshot, message):
-    if message.lower().strip() in ['ok','y','1']:
-        return None
-    else:
-        tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
-        return {
-                "messages": [
-                    ToolMessage(
-                        tool_call_id=tool_call_id,
-                        content=f"API call denied by user. Reasoning: '{message}'. Continue assisting, accounting for the user's input.",
-                        name='user_denied'
-                    )
-                ]
-            }
-
-def _update_sources(user_state):
-    collection_name = user_state['config']['configurable']["thread_id"]
-    sources = vector_db.get_sources(collection_name)
-    if sources:
-        title = "These are in your database:"
-        return "\n".join([title] + [f" - {source}" for source in sources])
-    else:
-        return "Nothing here"
-
-def _add_to_user_db(user_state, path):
-    collection_name = user_state['config']['configurable']["thread_id"]
-    vector_db.add(collection_name, path)
-    return user_state, None, _update_sources(user_state)
-
-def _on_session_change(user_state, session_id):
-    user_state['config']['configurable']["thread_id"] = session_id
-    config = user_state['config']
-    msgs = graph.get_state(config).values.get('messages', [])
-    history = _lc_to_gr_msgs(msgs)
-    sources = _update_sources(user_state)
-    return user_state, history, sources
-
-def _send_message(user_state, message, images, history):
-    config = user_state['config']
-    ask = user_state.get('ask') or []
-    messages = []
-    if not images and not message:
-        gr.Warning('Nothing to send')
-        return user_state, gr.update(), gr.update(), gr.update()
-    if images:
-        for image in images:
-            with open(image[0], 'rb') as f:
-                encoded_image = base64.b64encode(f.read()).decode('utf-8')
-            messages.append(HumanMessage(content=[{
-                "type":"image_url",
-                "image_url":{
-                    "url":f"data:image/png;base64,{encoded_image}",
-                    "detail":"low", # TODO: make this an option
-                    },
-            }]))
-    if message:
-        messages.append(HumanMessage(message))
-    history.extend(_lc_to_gr_msgs(messages))
-    yield user_state, "", None, history
-
-    snapshot = graph.get_state(config)
-    if snapshot.next and 'tool' in snapshot.next[0]:
-        # langchain expecting Human's confirmation (or deny)
-        graph_input = _human_tool_input(snapshot, message)
-    else:
-        graph_input = {"messages": messages}
+class CustomState(State):
+    user_info: NotRequired[str]
+    time: NotRequired[str]
     
-    for _ in range(10): # max 10 interactions before we get angry
-        events = graph.stream(graph_input, config, stream_mode="values")
-        messages = []
-        for event in events:
-            messages = event.get('messages')
-            if not messages:
-                continue
-            if not isinstance(messages, list):
-                messages = [messages]
-            history = _lc_to_gr_msgs(messages)
-            yield user_state, gr.update(), gr.update(), history
-        if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-            # conversation is not complete, AI waiting for confirmation
-            tool_name = messages[-1].tool_calls[0]['name'] # assume single tool call only
-            if ask and tool_name in set(ask):
-                # ask human and this interactio
-                history.append(gr.ChatMessage(role="assistant",
-                content="⚠️ I would like to use this tool. Reply 'ok' to continue or reply with a reason why not.⚠️"))
-                yield user_state, gr.update(), gr.update(), history
-                break
-            else:
-                # continue without asking
-                graph_input = None
-                continue
-        break
-    return
+def initialise_node(state:CustomState):
+    updates:CustomState = {'messages':[]}
+    # if 'user_info' not in state:
+    updates['user_info'] = tools.get_user_info.invoke({})
+    updates['time'] = datetime.now()
+    return updates
 
-def _send_default_message(user_state, message, history):
-    for us, _, _, history in _send_message(user_state, message, [], history):
-        yield us, history
-    return
-    try:
-        key = 'tools/ask_human'
-        original_config_ask_human = user_state['config']['configurable'].get(key)
-        user_state['config']['configurable'][key] = False
-        for us, _, _, history in _send_message(user_state, message, [], history):
-            yield us, history
-    finally:
-        if original_config_ask_human is None and key in us['config']['configurable']:
-            del user_state['config']['configurable'][key]
-        else:
-            us['config']['configurable'][key]=original_config_ask_human
-        yield us, gr.update()
+class PrimaryAI(AINode):
+    def __init__(self, llm, tools=None):
+        self.llm = llm
+        super().__init__('primary', tools or [])
+    def __call__(self, state: State, config: RunnableConfig) -> State:
+        runnable = (
+            ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a helpful assistant for Virtuos Games Company. "
+                        " Reply using your own knowledge first and only use the provided tools to assist the user when you lack knowledge. "
+                        " Use creation tools with care. "
+                        "\n\nCurrent User:\n<User>\n{user_info}\n</User>"
+                        "\nCurrent time: {time}.",
+                    ),
+                    ("placeholder", "{messages}"),
+                ]
+            )
+            | self.llm.with_config(config).bind_tools(self.tools) 
+            )
+        return {"messages": runnable.invoke(state)}
+    def switch_ai_tool(self):
+        @tool(response_format='content_and_artifact', parse_docstring=True)
+        def switch_to_primary_ai(
+                reason: str,
+            ):
+            """A tool to mark the current task as completed and/or to escalate control of the dialog to the primary assistant,
+            who can re-route the dialog to an search, image or IT agent based on the user's needs.
+            
+            Args:
+                reason: reason for completion or escalation.
+            """
+            return (
+                f"Resuming dialog with '{self.name}'. Please reflect on the past conversation and assist the user as needed.", 
+                {"to_ai":self.name}
+                )
+        return switch_to_primary_ai
+    
 
+class SearchAI(AINode):
+    def __init__(self, llm):
+        self.llm = llm
+        super().__init__('search', [
+            tools.search_internet, 
+            tools.search_session_data,
+            ])
+    def __call__(self, state: State, config: RunnableConfig) -> State:
+        runnable = (
+            RunnablePassthrough.assign(**{'session_data_summary':tools.get_session_data_summary})
+            | ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a helpful assistant for Virtuos Games Company. "
+                        " Use the provided tools to search for information to assist the user's queries. "
+                        " When searching, be persistent. Expand your query bounds if the first search returns no results. "
+                        " If a search comes up empty, expand your search before giving up."
+                        f" You can use the tools to refer the task to other assistants if the user is no longer requiring {self.name}. "
+                        "\n\nCurrent User:\n<User>\n{user_info}\n</User>"
+                        "\n\nCurrent Session Data Summary:\n<User>\n{session_data_summary}\n</User>"
+                        "\nCurrent time: {time}.",
+                    ),
+                    ("placeholder", "{messages}"),
+                ]
+            )
+            | self.llm.with_config(config).bind_tools(self.tools) 
+            )
+        return {"messages": runnable.invoke(state)}
+    def switch_ai_tool(self):
+        @tool(response_format='content_and_artifact')
+        def switch_to_search_ai(
+            query:str,
+            ):
+            """ Transfers work to a specialized assistant to handle searches. 
+            The search assistant has knowledge on latest events and user uploaded contents.
 
-import json
+            Args:
+                query: search query to look up
+            """
+            content=f"The assistant is now the '{self.name}'. Reflect on the above conversation between the host assistant and the user."\
+                    f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {self.name},"\
+                    " your task is not complete until after you have successfully invoked the appropriate tool."\
+                    f" You can use the tools to refer the task to other assistants if the user is no longer requiring {self.name}. "\
+                    " Do not mention who you are - just act as the proxy for the assistant."
+            return (
+                content, 
+                {"to_ai":self.name}
+                )
+        return switch_to_search_ai
+    
+class ImageAI(AINode):
+    def __init__(self, llm):
+        self.llm = llm
+        super().__init__('image', [
+            tools.generate_image_with_text,
+            ])
+    def __call__(self, state: State, config: RunnableConfig) -> State:
+        runnable = (
+            RunnablePassthrough.assign(**{'session_data_summary':tools.get_session_data_summary})
+            | ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a helpful assistant for Virtuos Games Company. "
+                        " Use the provided tools to generate images. "
+                        "\n\nCurrent User:\n<User>\n{user_info}\n</User>"
+                        "\nCurrent time: {time}.",
+                    ),
+                    ("placeholder", "{messages}"),
+                ]
+            ).partial(time=datetime.now())
+            | self.llm.with_config(config).bind_tools(self.tools) 
+            )
+        return {"messages": runnable.invoke(state)}
+    def switch_ai_tool(self):
+        @tool(response_format='content_and_artifact', parse_docstring=True)
+        def switch_to_image_ai(
+                reason:bool,
+            ):
+            """ Transfers work to a specialized assistant to handle image. 
+            The image assistant has the ability to send created images to the user.
 
-session_db.initialise_database()
-default_configurable = {
-    'email':'angela', 
-    'thread_id':None,
-    # 'llm/model_name': 'gpt-4o',
-    'llm/model_name': 'gpt-3.5-turbo',
-    'llm/temperature': 1,
-    }
+            Args:
+                reason: reason to switch to image assistant.
+            """
+            content=f"The assistant is now the '{self.name}'. Reflect on the above conversation between the host assistant and the user."\
+                    f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {self.name},"\
+                    " your task is not complete until after you have successfully invoked the appropriate tool."\
+                    f" You can use the tools to refer the task to other assistants if the user is no longer requiring {self.name}. "\
+                    " Do not mention who you are - just act as the proxy for the assistant."
+            return (
+                content, 
+                {"to_ai":self.name}
+                )
+        return switch_to_image_ai
 
-default_prompts = ['ok','improve answer by referenceing my database.','improve answer by including realtime intranet content.']
-with gr.Blocks() as demo:
-    user_state = gr.State(lambda: {'config':{'configurable':default_configurable.copy()}})
-    with gr.Row():
-        with gr.Column():
-            username = gr.Text(value=default_configurable['email'],label='username')
-            session_id = gr.Radio(label='session')
-            with gr.Row():
-                new_session_button = gr.Button('New Session', size='sm', min_width=60)
-                clear_sessions_button = gr.Button('Clear Sessions', size='sm', min_width=60)
-            with gr.Tabs():
-                with gr.Tab("Image"):
-                    images = gr.Gallery(type='filepath', format='png')
-                with gr.Tab("My Database"):
-                    sources = gr.Markdown()
-                    upload_file_button = gr.UploadButton(size='sm')
-                    url = gr.Text(container=False, placeholder='Add website to your database')
-            with gr.Accordion("Advanced Options", open=False):
-                model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
-                temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
-                # ask_human = gr.Checkbox(value=default_configurable['tools/ask_human'], label='ask_human')
-                ask_tools = gr.CheckboxGroup(choices=sorted(list(tool_names)), label='Ask before using these tools')
-            # debugging stuff
-        with gr.Column(scale=4):
-            chatbot = gr.Chatbot(type='messages', height="70vh")
-            message = gr.Text(placeholder='enter message', container=False)
-            with gr.Row():
-                default_prompt_buttons = [
-                    gr.Button(prompt, size='sm')
-                for prompt in default_prompts]
-                    
-
-    # events 
-    gr.on(fn=_on_user_change, triggers=[demo.load, username.submit], inputs=[user_state, username], outputs=[user_state, session_id])
-    session_id.change(fn=_on_session_change, inputs=[user_state, session_id], outputs=[user_state, chatbot, sources])
-    new_session_button.click(fn=_new_session, inputs=[user_state], outputs=[user_state, session_id])
-    clear_sessions_button.click(fn=_clear_sessions, inputs=[user_state], outputs=[user_state, session_id])
-    model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
-    temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
-    ask_tools.change(fn=lambda us, v:{**us, 'ask':v}, inputs=[user_state, ask_tools], outputs=[user_state])
-    # ask_human.input(fn=lambda us, v:_update_configurable(us, 'tools/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
-
-
-    upload_file_button.upload(_add_to_user_db, [user_state, upload_file_button], [user_state, upload_file_button, sources])
-    url.submit(_add_to_user_db, [user_state, url], [user_state, url, sources])
-
-    # sending messages
-    message.submit(
-        fn=_send_message, 
-        inputs=[user_state, message, images, chatbot],
-        outputs=[user_state, message, images, chatbot],
-        )
-    for btn in default_prompt_buttons:
-        btn.click(
-            _send_default_message,
-            inputs=[user_state, btn, chatbot],
-            outputs=[user_state, chatbot],
-        )
-
-    # debug stuff
-    with gr.Accordion("Debug",open=False):
-        with gr.Row():
-            us_btn = gr.Button('Print user_state', size='sm')
-            graph_state_btn = gr.Button('Print graph state', size='sm')
-        console = gr.Textbox(container=False)
-    us_btn.click(fn=lambda x:json.dumps(x, indent=2, default=str), inputs=[user_state], outputs=[console])
-    @graph_state_btn.click(inputs=[user_state], outputs=[console])
-    def _fn(user_state):
-        return json.dumps(graph.get_state(user_state['config']), indent=2, default=str)
 if __name__ == '__main__':
-    demo.launch()
+    import dotenv
+    dotenv.load_dotenv('.env')
+
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
+        model_name=ConfigurableField(
+                id="llm/model_name",
+                is_shared=True,
+            ),
+        temperature=ConfigurableField(
+                id="llm/temperature",
+                is_shared=True,
+            ),
+        )
+boss_ai_nodes = [
+    PrimaryAI(llm, tools = [
+        tools.search_internet, 
+        tools.search_session_data, 
+        tools.generate_image_with_text, 
+        tools.spell_backwards,
+        tools.get_jira_tickets,
+        tools.create_jira_ticket,
+        ]),
+    # AINode('primary', tools=[]),
+    # AINode('primary', tools=[tools._creeate_fake_tool("tool1")]),
+    # ImageAI(llm),
+    # PrimaryAI(llm),
+    ]
+sub_ai_nodes = [
+    # PrimaryAI(llm),
+    # SearchAI(llm),
+    # ImageAI(llm),
+]
+tool_node_names = [f'{node.name}_tools' for node in boss_ai_nodes + sub_ai_nodes if node.tools]
+tool_names = set()
+for node in boss_ai_nodes + sub_ai_nodes:
+    for t in  node.tools:
+        tool_names.add(t.name)
+
+# build graph
+builder = StateGraph(CustomState)
+builder.add_edge(START, "initialize")
+builder.add_node("initialize", initialise_node)
+graph = create_multiagent_graph(boss_ai_nodes, sub_ai_nodes, start='initialize', builder=builder)
+memory = MemorySaver()
+graph = graph.compile(
+    checkpointer=memory, 
+    interrupt_before=tool_node_names,
+    )
+fname, _ = os.path.splitext(os.path.basename(__file__))
+graph.get_graph(xray=True).draw_mermaid_png(output_file_path=f'graphs/{fname}.png')
+for node in sub_ai_nodes:
+    print(f"==== {node.name} ====")
+    for t in node.tools:
+        print(t)
+        print()
+    print("===")
+
+
+
+if __name__ == '__main__':
+
+    config = {"configurable":{"thread_id":str(uuid4())}}
+    msgs = [
+        HumanMessage(content="Tell me about qingyi"),
+        # HumanMessage(content="用中文"),
+        # HumanMessage(content="写一段关于她的小说吧。"),
+    ]
+    try:
+        for _ in range(10): 
+            if graph.get_state(config).next:
+                approve = input("approve:")
+                inputs = None
+            else:
+                msg = f"human: {msgs.pop(0)}" if msgs else input("human: ")
+                inputs = {"messages":[msg]}
+            events = graph.stream(inputs, config, stream_mode='updates')
+            for updates in events:
+                for node, updates in updates.items():
+                    print(f"== {node} ==")
+                    for k,v in updates.items():
+                        if k == 'messages':
+                            messages = updates.get('messages', [])
+                            if not isinstance(messages, list):
+                                messages = [messages]
+                            for message in messages:
+                                print(f"{message.type}: {message}")
+                                print()
+                        else:
+                            print(f"{k}: {v}")
+                    print()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(graph.get_state(config))
