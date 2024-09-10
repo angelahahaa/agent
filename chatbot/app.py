@@ -196,14 +196,14 @@ llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
             ),
         )
 boss_ai_nodes = [
-    PrimaryAI(llm, tools = [
-        tools.search_internet, 
-        tools.search_session_data, 
-        tools.generate_image_with_text, 
-        tools.spell_backwards,
-        tools.get_jira_tickets,
-        tools.create_jira_ticket,
-        ]),
+    # PrimaryAI(llm, tools = [
+    #     tools.search_internet, 
+    #     tools.search_session_data, 
+    #     tools.generate_image_with_text, 
+    #     tools.spell_backwards,
+    #     tools.get_jira_tickets,
+    #     tools.create_jira_ticket,
+    #     ]),
     # AINode('primary', tools=[]),
     # AINode('primary', tools=[tools._creeate_fake_tool("tool1")]),
     # ImageAI(llm),
@@ -213,6 +213,9 @@ sub_ai_nodes = [
     # PrimaryAI(llm),
     # SearchAI(llm),
     # ImageAI(llm),
+    AINode('primary_ai', tools=[tools._creeate_fake_tool('primari_tool_1')]),
+    # AINode('search_ai', tools=[]),
+    # AINode('jira_ai', tools=[]),
 ]
 tool_node_names = [f'{node.name}_tools' for node in boss_ai_nodes + sub_ai_nodes if node.tools]
 tool_names = set()
@@ -242,7 +245,6 @@ for node in sub_ai_nodes:
 
 
 if __name__ == '__main__':
-
     config = {"configurable":{"thread_id":str(uuid4())}}
     msgs = [
         HumanMessage(content="Tell me about qingyi"),

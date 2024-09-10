@@ -117,17 +117,23 @@ def create_multiagent_graph(
 
 
     builder = builder or StateGraph(State)
-    builder.add_edge(start, "route_to_ai")
-    builder.add_node("route_to_ai", route_to_ai)
-    builder.add_conditional_edges("route_to_ai", lambda state:state['current_ai'], {k:k for k in ai_names})
+    if len(ai_nodes) > 1:
+        builder.add_edge(start, "route_to_ai")
+        builder.add_node("route_to_ai", route_to_ai)
+        builder.add_conditional_edges("route_to_ai", lambda state:state['current_ai'], {k:k for k in ai_names})
+    else:
+        builder.add_edge(start, ai_nodes[0].name)
     # assistants
     for ai_node in ai_nodes:
         builder.add_node(ai_node.name, ai_node)
         if ai_node.tools:
             tools_node_name = f"{ai_node.name}_tools"
-            builder.add_conditional_edges(ai_node.name, tools_condition, {"tools":tools_node_name, END:end})
+            builder.add_conditional_edges(ai_node.name, tools_condition, {END:end, 'tools':tools_node_name})
             builder.add_node(tools_node_name, ToolNode(ai_node.tools))
-            builder.add_conditional_edges(tools_node_name, route_to_ai_or_end, {END:end, 'route_to_ai':'route_to_ai'})
+            if len(ai_nodes) > 1:
+                builder.add_conditional_edges(tools_node_name, route_to_ai_or_end, {END:end, 'route_to_ai':'route_to_ai'})
+            else:
+                builder.add_conditional_edges(tools_node_name, route_to_ai_or_end, {END:end, 'route_to_ai':node.name})
         else:
             builder.add_edge(ai_node.name, end)
 
