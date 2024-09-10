@@ -196,14 +196,14 @@ llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
             ),
         )
 boss_ai_nodes = [
-    # PrimaryAI(llm, tools = [
-    #     tools.search_internet, 
-    #     tools.search_session_data, 
-    #     tools.generate_image_with_text, 
-    #     tools.spell_backwards,
-    #     tools.get_jira_tickets,
-    #     tools.create_jira_ticket,
-    #     ]),
+    PrimaryAI(llm, tools = [
+        # tools.search_internet, 
+        # tools.search_session_data, 
+        # tools.generate_image_with_text, 
+        # tools.spell_backwards,
+        # tools.get_jira_tickets,
+        tools.create_jira_ticket,
+        ]),
     # AINode('primary', tools=[]),
     # AINode('primary', tools=[tools._creeate_fake_tool("tool1")]),
     # ImageAI(llm),
@@ -247,7 +247,7 @@ for node in sub_ai_nodes:
 if __name__ == '__main__':
     config = {"configurable":{"thread_id":str(uuid4())}}
     msgs = [
-        HumanMessage(content="Tell me about qingyi"),
+        # HumanMessage(content="Tell me about qingyi"),
         # HumanMessage(content="用中文"),
         # HumanMessage(content="写一段关于她的小说吧。"),
     ]
