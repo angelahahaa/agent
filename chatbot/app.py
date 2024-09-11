@@ -27,7 +27,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 
 from chatbot import tools
-from chatbot.multiagent import AINode, State, create_multiagent_graph
+from chatbot.architecture.multiagent import AINode, State, create_multiagent_graph
 
 
 

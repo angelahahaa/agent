@@ -9,15 +9,7 @@ from langchain_core.tools import BaseTool, tool
 from chatbot.database import vector_db
 
 
-def _creeate_fake_tool(name:str, return_direct:bool=False) -> BaseTool:
-    if return_direct:
-        def fn() -> None:
-            return None, {"return_direct": 'image' in name}
-        return StructuredTool.from_function(func=fn,name=name,description=name,response_format='content_and_artifact')
-    else:
-        def fn() -> None:
-            return 
-        return StructuredTool.from_function(func=fn,name=name,description=name,response_format='content')
+
 
 @tool
 def search_session_data(
@@ -166,4 +158,4 @@ def create_jira_ticket(
               a 'key' attribute which would be the unique identifier of the ticket.
     """
     # Mock implementation: return a dictionary with a fabricated ticket key
-    return {'key': f'MOCK-{random.randint(0,9999):04}'}
+    return {'key': f'MOCK-{random.randint(0,9999):04}','link':'http://exmple.com/'}
