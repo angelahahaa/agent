@@ -21,18 +21,15 @@ from chatbot.architecture.multiagent import State
 from chatbot.tools import get_user_info
 from langchain.tools.base import StructuredTool
 from chatbot.mocks import mock_tool_call
+POP = '<pop>'
 
 def reducer(left:List[str], right:str|List[str]):
     if isinstance(right, str):
         right = [right]
-    while left and right:
-        r = right.pop(0)
-        if r == left[-1]:
+    for r in right:
+        if r == POP:
             left.pop()
-        else:
-            left.append(r)
-            break
-    return left + right
+    return left + [r for r in right if r!=POP]
     
 class ClarifyState(TypedDict):
     messages: Annotated[List[AnyMessage], add_messages]
@@ -87,7 +84,7 @@ def process_pending_messages(state:ClarifyState, sensitive_tool_names:Set[str]):
                 break
             if tool_indices.get(name):
                 tool_indices[name].pop()
-                updates['pending_tool_calls'].append(name)
+                updates['pending_tool_calls'].append(POP)
             else:
                 break
         
@@ -169,26 +166,27 @@ def fn(state):
 
 if __name__ == '__main__':
     # tests
-    def test_process_pending_messages(pending_message, pending_tcs, clarify_tool_names, out_pending_tc_names, out_message):
+    def test_process_pending_messages(pm, ptcns, clarify_tool_names, expected_reduced_ptcns, expected_message):
         state = ClarifyState(
-            pending_message=pending_message, 
-            pending_tool_calls=pending_tcs)
+            pending_message=pm, 
+            pending_tool_calls=ptcns)
         result = process_pending_messages(state, clarify_tool_names)
         assert result["pending_message"] is None
-        assert result['pending_tool_calls'] == out_pending_tc_names, f"{result['pending_tool_calls']} != {out_pending_tc_names}"
-        assert (out_message is None and result.get('messages') is None) or \
-            (sorted([tc['name'] for tc in result['messages'].tool_calls]) == sorted([tc['name'] for tc in out_message.tool_calls]) \
-            and result['messages'].content==out_message.content), f"{result.get('messages')}!={out_message}"
+        actual_reduced_ptcs = reducer(ptcns, result['pending_tool_calls'])
+        assert actual_reduced_ptcs == expected_reduced_ptcns, f"{actual_reduced_ptcs} != {expected_reduced_ptcns}"
+        assert (expected_message is None and result.get('messages') is None) or \
+            (sorted([tc['name'] for tc in result['messages'].tool_calls]) == sorted([tc['name'] for tc in expected_message.tool_calls]) \
+            and result['messages'].content==expected_message.content), f"{result.get('messages')}!={expected_message}"
         
     def mock_ai_msg(context, tcs):
         return AIMessage(content=context,tool_calls=[mock_tool_call(tc) for tc in tcs])
     test_process_pending_messages(mock_ai_msg("",[]),[], {}, [],mock_ai_msg("",[]))
     test_process_pending_messages(mock_ai_msg("meow",["1"]),[], {}, [], mock_ai_msg("meow",["1"]))
     test_process_pending_messages(mock_ai_msg("",["1"]),[], {'1'}, ['1'],None)
-    test_process_pending_messages(mock_ai_msg("",["1"]) , ['1'], {'1'}, ["1"],mock_ai_msg("",["1"]))
-    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['1'], {'1'}, ["1"], mock_ai_msg("",["1","2"]))
-    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['2', '1'], {'1','2'}, ['1','2'], mock_ai_msg("",["1","2"]))
-    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['1', '3'], {'1'}, ["1"], mock_ai_msg("",["2"]))
-    test_process_pending_messages(mock_ai_msg("",["3","1","2"]) , ['1', '3'], {'1','3'}, ['3','1'], mock_ai_msg("",["3","1","2"]))
+    test_process_pending_messages(mock_ai_msg("",["1"]) , ['1'], {'1'}, [],mock_ai_msg("",["1"]))
+    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['1'], {'1'}, [], mock_ai_msg("",["1","2"]))
+    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['2', '1'], {'1','2'}, [], mock_ai_msg("",["1","2"]))
+    test_process_pending_messages(mock_ai_msg("",["1","2"]) , ['1', '3'], {'1'}, ['1', '3', '1'], mock_ai_msg("",["2"]))
+    test_process_pending_messages(mock_ai_msg("",["3","1","2"]) , ['1', '3'], {'1','3'}, [], mock_ai_msg("",["3","1","2"]))
     test_process_pending_messages(mock_ai_msg("",["3","1","2"]) , [], {'1','3'}, ['3','1'], mock_ai_msg("",["2"]))
     test_process_pending_messages(mock_ai_msg("meow",["3","1"]) , [], {'1','3'}, ['3','1'], None)
