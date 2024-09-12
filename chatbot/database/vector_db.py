@@ -10,7 +10,7 @@ import os
 DATABASE_URL='databases/vector_db'
 embd = OpenAIEmbeddings()
 text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-    chunk_size=500, chunk_overlap=0
+    chunk_size=1024, chunk_overlap=0, encoding_name="cl100k_base"
 )
 
 def vector_store(collection_name):

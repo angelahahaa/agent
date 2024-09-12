@@ -62,8 +62,7 @@ graph.get_graph(xray=True).draw_mermaid_png(output_file_path=f'graphs/{fname}.pn
 
 
 upload_file_prompt = "<span style=\"display:none\">"\
-    " user have uploaded a document to session data."\
-    " search the session database with a query to answer the user's needs."\
+    " I have uploaded a document to session data."\
     " </span>"\
     "📁{filename} Uploaded"
 default_prompts = ['approve','improve answer by referenceing my database.','improve answer by including realtime internet content.']
@@ -197,7 +196,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
     if snapshot.next and 'tool' in snapshot.next[0]:
         # langchain expecting Human's confirmation (or deny)
         graph_input = _human_tool_input(snapshot, message)
-        yield user_state, history[:-1] + _lc_to_gr_msgs(graph_input['message']) if graph_input else []
+        yield user_state, history[:-1] + _lc_to_gr_msgs(graph_input['messages']) if graph_input else []
     else:
         pending_messages = [HumanMessage(content=message) for message in user_state.get('pending_messages')]
         user_state['pending_messages'] = []
@@ -230,7 +229,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
     return
 
 def _send_message_and_clear_input(user_state, message, images, history):
-    if not message and not images:
+    if not message and not images and not user_state.get('pending_messages'):
         gr.Warning("Expecting image or message.")
         yield user_state, message, images, history
         return
@@ -252,14 +251,13 @@ def _add_to_user_db(user_state, path, history):
     sources = _update_sources(user_state)
 
     prompt = upload_file_prompt.format(filename=path if path.startswith('http') else os.path.basename(path))
-    user_state['pending_messages'].append(prompt)
-    history = history or []
-    history.append(gr.ChatMessage(role='user', content=prompt))
-    return user_state, None, sources, history
-    # gen = _send_message_no_image(user_state, upload_file_prompt.format(filename=os.path.basename(path)), history)
-    # for user_state, history in gen:
-    #     yield user_state, None, sources, history
-    # return
+    # user_state['pending_messages'].append(prompt)
+    # history = history or []
+    # history.append(gr.ChatMessage(role='user', content=prompt))
+    # return user_state, None, sources, history
+    gen = _send_message(user_state, prompt, [], history)
+    for user_state, history in gen:
+        yield user_state, None, sources, history
 
 
 def _on_session_change(user_state, session_id):
@@ -306,10 +304,10 @@ with gr.Blocks() as demo:
             with gr.Tabs():
                 with gr.Tab("Image"):
                     images = gr.Gallery(type='filepath', format='png')
-                with gr.Tab("My Database"):
+                with gr.Tab("Files"):
                     sources = gr.Markdown()
                     upload_file_button = gr.UploadButton(size='sm')
-                    url = gr.Text(container=False, placeholder='Add website to your database')
+                    url = gr.Text(container=False, placeholder='link to the file')
             with gr.Accordion("Advanced Options", open=False):
                 model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
                 temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
