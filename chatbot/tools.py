@@ -159,3 +159,11 @@ def create_jira_ticket(
     """
     # Mock implementation: return a dictionary with a fabricated ticket key
     return {'key': f'MOCK-{random.randint(0,9999):04}','link':'http://exmple.com/'}
+
+@tool
+def cancel_clarify_request(reason:str):
+    """
+    Args:
+        reason: reason for cancellation
+    """
+    return "Exiting from 'clarify requirements mode'. Proceed with the conversation."

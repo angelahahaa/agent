@@ -9,23 +9,18 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from chatbot import tools
-from chatbot.architecture.clarify import get_builder
+from chatbot.agents.jira import graph
 
-memory = MemorySaver()
-graph = get_builder(
-    ChatOpenAI(model="gpt-3.5-turbo", temperature=0),
-    normal_tools=[tools.get_jira_tickets, tools.spell_backwards],
-    clarify_tools=[tools.create_jira_ticket],
-    ).compile(checkpointer=memory)
 
-config = {"configurable":{"thread_id":str(uuid4())}}
+config = {"configurable":{"thread_id":str(uuid4()), 'email':'pengshiya'}}
 msgs = [
     HumanMessage(content="create jira ticket"),
-    HumanMessage(content="create one for implementing pgadmin"),
-    HumanMessage(content="its a task, medium priority, no labels, for description, can you use 'bamboozled' spelt backwards?"),
-    HumanMessage(content="quack"),
-    HumanMessage(content="no"),
-    HumanMessage(content="just kidddingg! i still want that ticket"),
+    HumanMessage(content="create one for implementing pgadmin, fill everything else in for me."),
+    # HumanMessage(content="create one for implementing pgadmin"),
+    # HumanMessage(content="its a task, medium priority, no labels, for description, can you use 'bamboozled' spelt backwards?"),
+    # HumanMessage(content="quack"),
+    # HumanMessage(content="no"),
+    # HumanMessage(content="just kidddingg! i still want that ticket"),
     # HumanMessage(content="Tell me about qingyi"),
     # HumanMessage(content="用中文"),
     # HumanMessage(content="写一段关于她的小说吧。"),

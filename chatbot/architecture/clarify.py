@@ -24,32 +24,26 @@ from typing_extensions import TypedDict
 
 from chatbot.architecture.multiagent import State
 from chatbot import mocks
-from chatbot.tools import get_user_info
+from chatbot.tools import get_user_info, cancel_clarify_request
 from chatbot.architecture.base import return_direct_condition
 POP = '<pop>'
 AGENT = 'agent'
 CLARIFY_AGENT = 'clarify_agent'
 
 def reducer(left:List[str], right:str|List[str]):
+    # print(f"left: {left}, right: {right}")
     if isinstance(right, str):
         right = [right]
-    for r in right:
-        if r == POP:
-            left.pop()
-    return left + [r for r in right if r!=POP]
+    i = len([r for r in right if r==POP])
+    merged = left[:-i] + [r for r in right if r!=POP]
+    # print(f"merged: {merged}")
+    return merged
     
 class ClarifyState(TypedDict):
     messages: Annotated[List[AnyMessage], add_messages]
     pending_message: AIMessage|None
     pending_tool_calls: Annotated[List[str], reducer]
 
-@tool
-def cancel_request(reason:str):
-    """
-    Args:
-        reason: reason for cancellation
-    """
-    return "Exiting from 'clarify requirements mode'. Proceed with the conversation."
 
 clarify_prompt = ChatPromptTemplate.from_messages(
     [
@@ -65,7 +59,7 @@ clarify_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-def process_pending_messages(state:ClarifyState, sensitive_tool_names:Set[str], cancel_request_tool_name:str=cancel_request.name):
+def process_pending_messages(state:ClarifyState, sensitive_tool_names:Set[str], cancel_request_tool_name:str=cancel_clarify_request.name):
     pending_message = state["pending_message"]
     updates = {
         'pending_message': None,
@@ -116,7 +110,6 @@ def process_pending_messages(state:ClarifyState, sensitive_tool_names:Set[str], 
         ]
         if pending_message.tool_calls:
             updates['messages'] = pending_message
-    
     return updates
 
 def route_process_pending_messages(state:ClarifyState):
@@ -134,9 +127,10 @@ def route_tools(state:ClarifyState):
 
 def clarify_agent_builder(
     runnable:Runnable[Any, AIMessage],
+    clarify_runnable:Runnable[Any, AIMessage], # bind this one with cancel_request_tool
     tools:List[BaseTool], 
     sensitive_tools:List[BaseTool],
-    cancel_request_tool:BaseTool=cancel_request,
+    cancel_request_tool:BaseTool=cancel_clarify_request,
     state_schema:Type[Dict]=ClarifyState,
 ) -> StateGraph:
     assert  'messages' in get_type_hints(state_schema), "Key 'messages' is missing from State definition"
@@ -146,14 +140,14 @@ def clarify_agent_builder(
     sensitive_tool_names = set([t.name for t in sensitive_tools])
     
     def invoke(state, config: RunnableConfig):
-        return {"pending_message":runnable.invoke(state)}
+        return {"pending_message":runnable.invoke(state, config)}
     async def ainvoke(state, config: RunnableConfig):
         return {"pending_message":await runnable.ainvoke(state, config)}
 
     # add the clarifying system prompt to the clarifying agent
     clarify_runnable = (
         RunnablePassthrough().assign(**{
-            'clarify_tool_name':lambda state: state['pending_tool_calls'][-1].tool_calls[0]['name'],
+            'clarify_tool_name':lambda state: state['pending_tool_calls'][-1],
         }).assign(**{
             'messages':(
                 clarify_prompt.partial(cancel_request_tool_name=cancel_request_tool.name) 
@@ -163,7 +157,7 @@ def clarify_agent_builder(
     )
 
     def clarify_invoke(state, config: RunnableConfig):
-        return {"pending_message":clarify_runnable.invoke(state)}
+        return {"pending_message":clarify_runnable.invoke(state, config)}
     async def clarify_ainvoke(state, config: RunnableConfig):
         return {"pending_message":await clarify_runnable.ainvoke(state, config)}
 
@@ -173,7 +167,7 @@ def clarify_agent_builder(
     builder = StateGraph(state_schema)
     builder.add_node(AGENT, agent)
     builder.add_node(CLARIFY_AGENT, clarify_agent)
-    builder.add_node('process_pending_messages', partial(process_pending_messages, sensitive_tool_names=sensitive_tool_names, cancel_request_tool_name=cancel_request_tool.name))
+    builder.add_node('process_pending_messages', lambda state: process_pending_messages(state,sensitive_tool_names=sensitive_tool_names, cancel_request_tool_name=cancel_request_tool.name))
     builder.add_node('tools', ToolNode(tools + sensitive_tools + [cancel_request_tool]))
     
     builder.add_conditional_edges(START, lambda state:CLARIFY_AGENT if state['pending_tool_calls'] else AGENT, [AGENT, CLARIFY_AGENT])
@@ -220,4 +214,4 @@ if __name__ == '__main__':
     test_process_pending_messages(mock_ai_msg("",["3","1","2"]) , ['1', '3'], {'1','3'}, [], mock_ai_msg("",["3","1","2"]))
     test_process_pending_messages(mock_ai_msg("",["3","1","2"]) , [], {'1','3'}, ['3','1'], mock_ai_msg("",["2"]))
     test_process_pending_messages(mock_ai_msg("meow",["3","1"]) , [], {'1','3'}, ['3','1'], None)
-    test_process_pending_messages(mock_ai_msg("meow",["3",cancel_request.name]) , ['1','2'], {'1','2','3'}, ['1','3'], mock_ai_msg("meow",cancel_request.name))
+    test_process_pending_messages(mock_ai_msg("meow",["3",cancel_clarify_request.name]) , ['1','2'], {'1','2','3'}, ['1','3'], mock_ai_msg("meow",cancel_clarify_request.name))
