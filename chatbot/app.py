@@ -3,10 +3,9 @@ import dotenv
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, NotRequired
+from typing import NotRequired
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
@@ -15,9 +14,7 @@ from langgraph.graph import START, StateGraph
 logger = logging.getLogger()
 import os
 from datetime import datetime
-from typing import Annotated
 
-from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (ConfigurableField, RunnableConfig,
                                       RunnablePassthrough)
@@ -27,9 +24,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 
 from chatbot import tools
-from chatbot.architecture.multiagent import AINode, State, create_multiagent_graph
-
-
+from chatbot.architecture.multiagent import (AINode, State,
+                                             create_multiagent_graph)
 
 
 class CustomState(State):

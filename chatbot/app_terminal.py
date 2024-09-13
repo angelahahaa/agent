@@ -16,6 +16,7 @@ config = {"configurable":{"thread_id":str(uuid4()), 'email':'pengshiya'}}
 msgs = [
     HumanMessage(content="create jira ticket"),
     HumanMessage(content="create one for implementing pgadmin, fill everything else in for me."),
+    HumanMessage(content="search internet for a good description for this task."),
     # HumanMessage(content="create one for implementing pgadmin"),
     # HumanMessage(content="its a task, medium priority, no labels, for description, can you use 'bamboozled' spelt backwards?"),
     # HumanMessage(content="quack"),
@@ -56,5 +57,5 @@ try:
                 print()
 except KeyboardInterrupt:
     pass
-finally:
-    print(graph.get_state(config))
+# finally:
+#     print(graph.get_state(config))

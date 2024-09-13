@@ -161,9 +161,10 @@ def create_jira_ticket(
     return {'key': f'MOCK-{random.randint(0,9999):04}','link':'http://exmple.com/'}
 
 @tool
-def cancel_clarify_request(reason:str):
-    """
+def cancel_clarify_request(tool_name:str, cancel_reason:str):
+    """ Exits clarifying requirements for a tool.
     Args:
-        reason: reason for cancellation
+        tool_name: name of the tool 
+        cancel_reason: reason for cancellation
     """
     return "Exiting from 'clarify requirements mode'. Proceed with the conversation."
