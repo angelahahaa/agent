@@ -1,6 +1,6 @@
 
 import random
-from typing import Annotated, Literal
+from typing import Annotated, Dict, Literal
 from langchain.tools.base import StructuredTool
 from langchain_community.tools import TavilySearchResults
 from langchain_core.runnables import RunnableConfig
@@ -53,7 +53,7 @@ def get_session_data_summary(config:RunnableConfig) -> str:
     return f"Session has data from sources: {data['data_source']}"
 
 @tool
-def get_user_info(config: RunnableConfig, include_session_data_summary=True):
+def get_user_info(config: RunnableConfig, include_session_data_summary=True) -> Dict:
     """ Fetch all user information.
     Returns:
         A dictionary of user information. Returns an empty dictionary if no user information found.

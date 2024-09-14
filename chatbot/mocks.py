@@ -50,10 +50,10 @@ class MockChat(BaseChatModel):
         if txt in tool_names:
             message = AIMessage(content="", tool_calls=[mock_tool_call(txt)])
         elif tools and random.choice([True, False]):
-            tool_calls=[mock_tool_call(random.choice(tool_names))  for _ in range(random.randint(1,3)) ]
+            tool_calls=[mock_tool_call(random.choice(list(tool_names)))  for _ in range(random.randint(1,3)) ]
             message = AIMessage(content="", tool_calls=tool_calls)
         else:
-            message = AIMessage(content=txt or "empty")
+            message = AIMessage(content=f"you said \"{txt}\"" or "empty")
         return ChatResult(
             generations=[ChatGeneration(message=message)]
         )

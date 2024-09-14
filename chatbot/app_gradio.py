@@ -22,42 +22,18 @@ from langgraph.checkpoint.memory import MemorySaver
 from chatbot.database import vector_db
 
 # == llm
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
-        model_name=ConfigurableField(
-                id="llm/model_name",
-                is_shared=True,
-            ),
-        temperature=ConfigurableField(
-                id="llm/temperature",
-                is_shared=True,
-            ),
-        )
+# llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
+#         model_name=ConfigurableField(
+#                 id="llm/model_name",
+#                 is_shared=True,
+#             ),
+#         temperature=ConfigurableField(
+#                 id="llm/temperature",
+#                 is_shared=True,
+#             ),
+#         )
 # == agent
-from chatbot import tools
-from chatbot.architecture.clarify import get_builder as get_clarify_builder
-
-memory = MemorySaver()
-normal_tools=[
-    # tools.generate_image_with_text, 
-    # tools.get_jira_tickets, 
-    tools.search_internet,
-    tools.search_session_data,
-    ]
-clarify_tools=[
-    # tools.create_jira_ticket,
-    ]
-all_tools = normal_tools + clarify_tools
-builder = get_clarify_builder(
-    ChatOpenAI(model="gpt-3.5-turbo", temperature=0),
-    normal_tools=normal_tools,
-    clarify_tools=clarify_tools,
-    )
-graph = builder.compile(
-    checkpointer=memory,
-    interrupt_before=[k for k in builder.nodes.keys() if 'tools' in k]
-    )
-fname, _ = os.path.splitext(os.path.basename(__file__))
-graph.get_graph(xray=True).draw_mermaid_png(output_file_path=f'graphs/{fname}.png')
+from chatbot.agents.jira import graph, all_tools
 # == application
 
 

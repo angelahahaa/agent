@@ -52,7 +52,7 @@ clarify_prompt = ChatPromptTemplate.from_messages(
             " If user no longer wish to continue using {clarify_tool_name} call {cancel_request_tool_name} to cancel. "
             " If user diverged conversation from {clarify_tool_name}, guide them back. "
         ),
-        ("placeholder", "{messages}"),
+        # ("placeholder", "{messages}"),
     ]
 )
 
@@ -95,7 +95,7 @@ def process_pending_message(state:ClarifyState, config:RunnableConfig, sensitive
                 updates['messages'] += [
                     AIMessage(content="", tool_calls=[tc]), 
                     ToolMessage(content=f"Call denied. Complete {pending_tool_name} clarification OR"
-                                " cancel with {cancel_request_tool_name} before using this tool.", tool_call_id=tc['id'])]
+                                f" cancel with {cancel_request_tool_name} before using this tool.", tool_call_id=tc['id'])]
             else:
                 ntc.append(tc)
         if ntc:
@@ -121,78 +121,96 @@ def route_tools(state:ClarifyState):
 
 
 def clarify_agent_builder(
-    runnable:Runnable[Any, AIMessage], # llm.bind_tools(tools+sensitive_tools)
+    runnable:Runnable[Any, AIMessage],
     tools:List[BaseTool], 
     sensitive_tools:List[BaseTool],
+    *,
     cancel_request_tool:BaseTool=cancel_clarify_request,
-    state_schema:Type[Dict]|None=None,
-    builder:StateGraph|None=None,
+    builder:StateGraph | None = None,
     start:str=START,
     end:str=END,
     node_name_prefix:str="",
 ) -> StateGraph:
+    """
+    Builds an agent with the ability to handle tool calls, including sensitive ones, and clarifies requests when necessary.
+
+    Args:
+        runnable: Must have method .bind_tools implemented. runnable.bind_tools(...).invoke(...) and runnable.bind_tools(...).ainvoke(...) should return BaseMessage.
+        tools: List of standard tools available to the agent.
+        sensitive_tools: List of tools that require clarification before use.
+        cancel_request_tool: A tool that allows cancellation of a clarification request.
+        builder: Predefined StateGraph to build upon, or None to create a new one with default state_schema.
+        start: Identifier for the start node.
+        end: Identifier for the end node.
+        node_name_prefix: Prefix for naming nodes within the graph.
+
+    Returns:
+        StateGraph: The constructed state graph representing the agent's behavior.
+    """
     # validate
-    if builder is not None and state_schema is not None:
-        logger.warning(f"state_schema {state_schema} will be ignored.")
-    state_schema = builder.schema if builder else state_schema or ClarifyState
-    assert  'messages' in get_type_hints(state_schema), "Key 'messages' is missing from State definition"
-    assert  'pending_message' in get_type_hints(state_schema), "Key 'pending_messages' is missing from State definition"
-    assert  'pending_tool_calls' in get_type_hints(state_schema), "Key 'pending_tool_calls' is missing from State definition"
+    state_schema = builder.schema if builder else ClarifyState
+    assert  'messages' in get_type_hints(state_schema), "Key 'messages' is missing from state_schema definition"
+    assert  'pending_message' in get_type_hints(state_schema), "Key 'pending_messages' is missing from state_schema definition"
+    assert  'pending_tool_calls' in get_type_hints(state_schema), "Key 'pending_tool_calls' is missing from state_schema definition"
+    assert hasattr(runnable, "bind_tools"), "runnable.bind_tools not implemented."
 
-    # define variables
-    sensitive_tool_names = set([t.name for t in sensitive_tools])
-
-    # define agent
+    # define agent node
+    agent_runnable = runnable.bind_tools(tools + sensitive_tools)
     def invoke(state, config: RunnableConfig):
         return {
-            "pending_message": runnable.invoke(state, config),
+            "pending_message": agent_runnable.invoke(state, config),
             "current_agent": "main",
             }
     async def ainvoke(state, config: RunnableConfig):
         return {
-            "pending_message": await runnable.ainvoke(state, config),
+            "pending_message": await agent_runnable.ainvoke(state, config),
             "current_agent": "main",
             }
     agent = RunnableLambda(invoke, ainvoke, node_name_prefix + AGENT)
 
-    # define clarify agent
-    clarify_runnable = (
-        RunnablePassthrough().assign(**{
-            'clarify_tool_name':lambda state: state['pending_tool_calls'][-1],
-        }).assign(**{
-            'messages':(
-                clarify_prompt.partial(cancel_request_tool_name=cancel_request_tool.name) 
-                | RunnableLambda(lambda x : x.messages))
-        })
-        | runnable
-    )
-    def clarify_invoke(state, config: RunnableConfig):
+    # define clarify agent node
+    clarify_runnable = runnable.bind_tools(tools + sensitive_tools + [cancel_request_tool])
+    def clarify_invoke(state:ClarifyState, config: RunnableConfig):
+        state['messages'] = clarify_prompt.invoke({
+            "cancel_request_tool_name":cancel_request_tool.name,
+            'clarify_tool_name':state['pending_tool_calls'][-1],
+        }).messages + state['messages']
         return {
             "pending_message":clarify_runnable.invoke(state, config),
             "current_agent": "clarify",
             }
-    async def clarify_ainvoke(state, config: RunnableConfig):
+    async def clarify_ainvoke(state:ClarifyState, config: RunnableConfig):
+        state['messages'] = clarify_prompt.invoke({
+            "cancel_request_tool_name":cancel_request_tool.name,
+            'clarify_tool_name':state['pending_tool_calls'][-1],
+        }).messages + state['messages']
         return {
             "pending_message":await clarify_runnable.ainvoke(state, config),
             "current_agent": "clarify",
             }
-
     clarify_agent = RunnableLambda(clarify_invoke, clarify_ainvoke, node_name_prefix + CLARIFY_AGENT)
 
-    # define tools
+    # define process_pending_message node
+    ppm_node = RunnableLambda(
+        func = partial(process_pending_message, 
+                       sensitive_tool_names=set([t.name for t in sensitive_tools]), 
+                       cancel_request_tool_name=cancel_request_tool.name), 
+        name = node_name_prefix + 'process_pending_message')
+
+    # define tools node
     tools_node = ToolNode(tools + sensitive_tools + [cancel_request_tool], name=node_name_prefix + "tools")
 
     # build
     builder = builder or StateGraph(state_schema)
     # nodes
-    ppm_node_name = node_name_prefix + 'process_pending_message'
     builder.add_node(agent.name, agent)
     builder.add_node(clarify_agent.name, clarify_agent)
-    builder.add_node(ppm_node_name, 
-                     partial(process_pending_message, sensitive_tool_names=sensitive_tool_names, cancel_request_tool_name=cancel_request_tool.name))
+    builder.add_node(ppm_node.name, ppm_node)
     builder.add_node(tools_node.name, tools_node)
     # edges
-    builder.add_conditional_edges(start, route_start, {AGENT:agent.name, CLARIFY_AGENT:clarify_agent.name}, then=ppm_node_name)
-    builder.add_conditional_edges(ppm_node_name, route_process_pending_message, {END:end, "tools":tools_node.name, CLARIFY_AGENT:clarify_agent.name})
+    builder.add_conditional_edges(start, route_start, {AGENT:agent.name, CLARIFY_AGENT:clarify_agent.name})
+    builder.add_edge(clarify_agent.name, ppm_node.name)
+    builder.add_edge(agent.name, ppm_node.name)
+    builder.add_conditional_edges(ppm_node.name, route_process_pending_message, {END:end, "tools":tools_node.name, CLARIFY_AGENT:clarify_agent.name})
     builder.add_conditional_edges(tools_node.name, route_tools, {END:end, AGENT:agent.name, CLARIFY_AGENT:clarify_agent.name})
     return builder
