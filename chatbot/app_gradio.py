@@ -33,7 +33,8 @@ from chatbot.database import vector_db
 #             ),
 #         )
 # == agent
-from chatbot.agents.jira import graph, all_tools
+from chatbot.agents.all_in_one import graph, all_tools
+
 # == application
 
 
@@ -86,6 +87,15 @@ def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
                     temp_file.write(image_data)
                     content = {"path":temp_file.name}
                 gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
+            elif msg.name == 'generate_images':
+                # customise how we display this
+                encoded_images = msg.artifact['images']
+                for encoded_image in encoded_images:
+                    image_data = base64.b64decode(encoded_image)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+                        temp_file.write(image_data)
+                        content = {"path":temp_file.name}
+                    gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
             else:
                 pass
         elif isinstance(msg, SystemMessage):
@@ -179,7 +189,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
         graph_input = {"messages": pending_messages + messages}
     
     for _ in range(10): # max 10 interactions before we get angry
-        events = graph.stream(graph_input, config, stream_mode="values")
+        events = graph.stream(graph_input, config, stream_mode="values", interrupt_before="tools")
         messages = []
         for event in events:
             messages = event.get('messages')

@@ -114,7 +114,7 @@ def route_process_pending_message(state:ClarifyState):
     return tools_condition(state)
 
 def route_tools(state:ClarifyState):
-    if state['pending_message']:
+    if state['pending_tool_calls']:
         return CLARIFY_AGENT
     return return_direct_condition(state)
 
