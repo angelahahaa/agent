@@ -1,4 +1,5 @@
 import os
+
 import dotenv
 
 from chatbot.database import session_db
@@ -14,16 +15,33 @@ from typing import Dict, Generator, List, Tuple
 import gradio as gr
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
                                      SystemMessage, ToolMessage)
+from langchain_core.runnables import ConfigurableField
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 
 from chatbot.database import vector_db
-# == agent
-from chatbot.app import graph, tool_names
 
+# == llm
+# llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
+#         model_name=ConfigurableField(
+#                 id="llm/model_name",
+#                 is_shared=True,
+#             ),
+#         temperature=ConfigurableField(
+#                 id="llm/temperature",
+#                 is_shared=True,
+#             ),
+#         )
+# == agent
+from chatbot.agents.jira import graph, all_tools
 # == application
 
 
-upload_file_prompt = "<span style=\"display:none\"> user have uploaded a document '{filename}' to session data. </span> 📁{filename}"
-default_prompts = ['ok','improve answer by referenceing my database.','improve answer by including realtime internet content.']
+upload_file_prompt = "<span style=\"display:none\">"\
+    " I have uploaded a document to session data."\
+    " </span>"\
+    "📁{filename} Uploaded"
+default_prompts = ['approve','improve answer by referenceing my database.','improve answer by including realtime internet content.']
 
 
 def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
@@ -106,7 +124,7 @@ def _update_configurable(user_state, key, value):
     return user_state
 
 def _human_tool_input(snapshot, message):
-    if message.lower().strip() in ['ok','y','1']:
+    if message.lower().strip() in ['ok','y','1','approve']:
         return None
     else:
         tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
@@ -154,6 +172,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
     if snapshot.next and 'tool' in snapshot.next[0]:
         # langchain expecting Human's confirmation (or deny)
         graph_input = _human_tool_input(snapshot, message)
+        yield user_state, history[:-1] + _lc_to_gr_msgs(graph_input['messages']) if graph_input else []
     else:
         pending_messages = [HumanMessage(content=message) for message in user_state.get('pending_messages')]
         user_state['pending_messages'] = []
@@ -175,7 +194,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
             if ask and any(tool_call['name'] in set(ask) for tool_call in messages[-1].tool_calls):
                 # ask human and this interactio
                 history.append(gr.ChatMessage(role="assistant",
-                content="⚠️ I would like to use this tool. Reply 'ok' to continue or reply with a reason why not.⚠️"))
+                content="⚠️ I would like to use this tool. Reply 'approve' to continue or reply with a reason why not.⚠️"))
                 yield user_state, history
                 break
             else:
@@ -186,7 +205,7 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
     return
 
 def _send_message_and_clear_input(user_state, message, images, history):
-    if not message and not images:
+    if not message and not images and not user_state.get('pending_messages'):
         gr.Warning("Expecting image or message.")
         yield user_state, message, images, history
         return
@@ -208,14 +227,13 @@ def _add_to_user_db(user_state, path, history):
     sources = _update_sources(user_state)
 
     prompt = upload_file_prompt.format(filename=path if path.startswith('http') else os.path.basename(path))
-    user_state['pending_messages'].append(prompt)
-    history = history or []
-    history.append(gr.ChatMessage(role='user', content=prompt))
-    return user_state, None, sources, history
-    # gen = _send_message_no_image(user_state, upload_file_prompt.format(filename=os.path.basename(path)), history)
-    # for user_state, history in gen:
-    #     yield user_state, None, sources, history
-    # return
+    # user_state['pending_messages'].append(prompt)
+    # history = history or []
+    # history.append(gr.ChatMessage(role='user', content=prompt))
+    # return user_state, None, sources, history
+    gen = _send_message(user_state, prompt, [], history)
+    for user_state, history in gen:
+        yield user_state, None, sources, history
 
 
 def _on_session_change(user_state, session_id):
@@ -238,11 +256,14 @@ session_db.initialise_database()
 default_configurable = {
     'email':'angela', 
     'thread_id':None,
-    'llm/model_name': 'gpt-4o',
-    # 'llm/model_name': 'gpt-3.5-turbo',
-    'llm/temperature': 1,
+    # 'llm/model_name': 'gpt-4o',
+    'llm/model_name': 'gpt-3.5-turbo',
+    'llm/temperature': 0,
     }
-default_ask = ['create_jira_ticket','search_internet']
+default_ask = [
+    'create_jira_ticket',
+    'search_internet',
+    ]
 with gr.Blocks() as demo:
     user_state = gr.State(lambda: {
         'config':{'configurable':default_configurable.copy()},
@@ -259,14 +280,16 @@ with gr.Blocks() as demo:
             with gr.Tabs():
                 with gr.Tab("Image"):
                     images = gr.Gallery(type='filepath', format='png')
-                with gr.Tab("My Database"):
+                with gr.Tab("Files"):
                     sources = gr.Markdown()
                     upload_file_button = gr.UploadButton(size='sm')
-                    url = gr.Text(container=False, placeholder='Add website to your database')
+                    url = gr.Text(container=False, placeholder='link to the file')
             with gr.Accordion("Advanced Options", open=False):
                 model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
                 temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
-                ask_tools = gr.CheckboxGroup(choices=sorted(list(tool_names)), value=default_ask,label='Ask before using these tools')
+                ask_tools = gr.CheckboxGroup(
+                    choices=sorted([t.name for t in all_tools]), 
+                    value=default_ask,label='Ask before using these tools')
             # debugging stuff
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")

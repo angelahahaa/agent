@@ -1,6 +1,6 @@
 
 import random
-from typing import Annotated, Literal
+from typing import Annotated, Dict, Literal
 from langchain.tools.base import StructuredTool
 from langchain_community.tools import TavilySearchResults
 from langchain_core.runnables import RunnableConfig
@@ -9,15 +9,7 @@ from langchain_core.tools import BaseTool, tool
 from chatbot.database import vector_db
 
 
-def _creeate_fake_tool(name:str, return_direct:bool=False) -> BaseTool:
-    if return_direct:
-        def fn() -> None:
-            return None, {"return_direct": 'image' in name}
-        return StructuredTool.from_function(func=fn,name=name,description=name,response_format='content_and_artifact')
-    else:
-        def fn() -> None:
-            return 
-        return StructuredTool.from_function(func=fn,name=name,description=name,response_format='content')
+
 
 @tool
 def search_session_data(
@@ -61,7 +53,7 @@ def get_session_data_summary(config:RunnableConfig) -> str:
     return f"Session has data from sources: {data['data_source']}"
 
 @tool
-def get_user_info(config: RunnableConfig, include_session_data_summary=True):
+def get_user_info(config: RunnableConfig, include_session_data_summary=True) -> Dict:
     """ Fetch all user information.
     Returns:
         A dictionary of user information. Returns an empty dictionary if no user information found.
@@ -166,4 +158,13 @@ def create_jira_ticket(
               a 'key' attribute which would be the unique identifier of the ticket.
     """
     # Mock implementation: return a dictionary with a fabricated ticket key
-    return {'key': f'MOCK-{random.randint(0,9999):04}'}
+    return {'key': f'MOCK-{random.randint(0,9999):04}','link':'http://exmple.com/'}
+
+@tool
+def cancel_clarify_request(tool_name:str, cancel_reason:str):
+    """ Exits clarifying requirements for a tool.
+    Args:
+        tool_name: name of the tool 
+        cancel_reason: reason for cancellation
+    """
+    return "Exiting from 'clarify requirements mode'. Proceed with the conversation."

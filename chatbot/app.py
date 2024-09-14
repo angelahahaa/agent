@@ -3,10 +3,9 @@ import dotenv
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, NotRequired
+from typing import NotRequired
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
@@ -15,9 +14,7 @@ from langgraph.graph import START, StateGraph
 logger = logging.getLogger()
 import os
 from datetime import datetime
-from typing import Annotated
 
-from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (ConfigurableField, RunnableConfig,
                                       RunnablePassthrough)
@@ -27,9 +24,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 
 from chatbot import tools
-from chatbot.multiagent import AINode, State, create_multiagent_graph
-
-
+from chatbot.architecture.multiagent import (AINode, State,
+                                             create_multiagent_graph)
 
 
 class CustomState(State):
@@ -196,14 +192,14 @@ llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).configurable_fields(
             ),
         )
 boss_ai_nodes = [
-    # PrimaryAI(llm, tools = [
-    #     tools.search_internet, 
-    #     tools.search_session_data, 
-    #     tools.generate_image_with_text, 
-    #     tools.spell_backwards,
-    #     tools.get_jira_tickets,
-    #     tools.create_jira_ticket,
-    #     ]),
+    PrimaryAI(llm, tools = [
+        # tools.search_internet, 
+        # tools.search_session_data, 
+        # tools.generate_image_with_text, 
+        # tools.spell_backwards,
+        # tools.get_jira_tickets,
+        tools.create_jira_ticket,
+        ]),
     # AINode('primary', tools=[]),
     # AINode('primary', tools=[tools._creeate_fake_tool("tool1")]),
     # ImageAI(llm),
@@ -247,7 +243,7 @@ for node in sub_ai_nodes:
 if __name__ == '__main__':
     config = {"configurable":{"thread_id":str(uuid4())}}
     msgs = [
-        HumanMessage(content="Tell me about qingyi"),
+        # HumanMessage(content="Tell me about qingyi"),
         # HumanMessage(content="用中文"),
         # HumanMessage(content="写一段关于她的小说吧。"),
     ]
