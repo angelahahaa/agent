@@ -90,7 +90,8 @@ def get_user_info(config: RunnableConfig, include_session_data_summary=True) -> 
 @tool(response_format='content_and_artifact')
 def generate_images(
     prompt: str,
-    model:Literal['sdv1-5-base','sdv1-5-dreamshaper']='sdv1-5-dreamshaper'
+    model:Literal['sdv1-5-base','sdv1-5-dreamshaper']='sdv1-5-dreamshaper',
+    num_images_per_prompt:int=1,
 ):
     """Generates AI-GC (AI-generated content) images based on the provided text prompt using a specified model.
 
@@ -98,6 +99,7 @@ def generate_images(
         prompt (str): A string containing the textual description or keywords that will be used to guide the AI-GC image generation.
         model (Literal['sdv1-5-base', 'sdv1-5-dreamshaper']): The model to use for generating the images. 
             Defaults to 'sdv1-5-dreamshaper'.
+        num_images_per_prompt: should be value 1-4.
     """
     url = {
         'sdv1-5-base':"https://z3601svaoyjoa4e0.us-east-1.aws.endpoints.huggingface.cloud",
@@ -110,7 +112,7 @@ def generate_images(
     }
     payload = {
         "inputs": {"prompt":prompt},
-        "parameters": {"num_images_per_prompt":1}
+        "parameters": {"num_images_per_prompt":num_images_per_prompt}
     }
     response = requests.post(url, headers=headers, json=payload)
     return "Images generated and displayed to user.", {'images':response.json()['images'], 'return_direct':True}
