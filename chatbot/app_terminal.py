@@ -10,7 +10,23 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from chatbot import tools
-from chatbot.agents.all_in_one import graph
+from chatbot.architecture.multiagent import Agent, multi_agent_builder
+from chatbot.mocks import MockChat, mock_tool
+# from chatbot.agents.all_in_one import graph
+base_agent = Agent(
+    name='base',
+    llm=MockChat(model='base'),
+    tools=[mock_tool('base1'), mock_tool('base2')],
+)
+worker1 = Agent(
+    name='worker1',
+    llm=MockChat(model='worker1'),
+    tools=[mock_tool('worker11'), mock_tool('worker12')],
+)
+worker1.tools.append(base_agent.enter_tool)
+base_agent.tools.append(worker1.enter_tool)
+checkpointer = MemorySaver()
+graph = multi_agent_builder([base_agent, worker1]).compile(checkpointer=checkpointer)
 
 def print_messages_without_duplicates(messages:List[BaseMessage], id_tracker:Set|None=None):
     id_tracker = set() if id_tracker is None else id_tracker
@@ -26,6 +42,7 @@ def print_messages_without_duplicates(messages:List[BaseMessage], id_tracker:Set
 
 config = {"configurable":{"thread_id":str(uuid4()), 'email':'pengshiya'}}
 msgs = [
+    HumanMessage(content="worker1"),
     # HumanMessage(content="What tasks do I have?"),
     # HumanMessage(content="Great, thanks! I need some inspiration for my designs. Could you help me find some references about cyberpunk?"),
     # HumanMessage(content="I need to install substance painter."),

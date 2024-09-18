@@ -1,143 +1,165 @@
 import logging
-import random
-from typing import Annotated, List, Literal, NotRequired, Set, TypeVar, TypedDict, Dict, Generic
-from uuid import uuid4
+from functools import partial
+from typing import (Annotated, Any, Dict, List, Literal, Set, Type, TypedDict,
+                    TypeVar, get_type_hints)
 
-from langchain.tools.base import StructuredTool
 from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import (Runnable, RunnableConfig, RunnableLambda,
+                                      RunnablePassthrough)
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import BaseModel, AfterValidator, Field, model_validator, SkipValidation
 from typing_extensions import TypedDict
+from chatbot.mocks import MockChat, mock_tool
+from chatbot.architecture.base import return_direct_condition
+from langchain_core.language_models.chat_models import BaseChatModel
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger()
-        
-def create_switch_ai_tool(ai_name, role:Literal['primary', 'specialist','foo'] = 'foo', additional_description=""):
-    """ creates a simple tool for switching to a new ai, please customise for better results"""
-    if role == 'primary':
-        content=f"Resuming dialog with {ai_name}. Please reflect on the past conversation and assist the user as needed."
-    elif role == 'specialist':
-        content = f"The assistant is now the {ai_name}. Reflect on the above conversation between the host assistant and the user."\
-                f" The user's intent is unsatisfied. Use the provided tools to assist the user. Remember, you are {ai_name},"\
-                " your task is not complete until after you have successfully invoked the appropriate tool."\
-                " If the user changes their mind or needs help for other tasks, call the to_primary_assistant function to let the primary host assistant take control."\
-                " Do not mention who you are - just act as the proxy for the assistant."
+POP='<pop>'
+PopType = Literal['<pop>']
+
+def extend_or_pop(left:List[str], right:List[str]|PopType):
+    if not right:
+        return left
+    if right == POP:
+        return left[-1]
+    return left + right
+
+class MultiAgentState(TypedDict):
+    messages:Annotated[AnyMessage, add_messages]
+    current_agent:Annotated[List[str], extend_or_pop]
+    pending_message:AIMessage
+
+def assert_has_bind_tools(agent):
+    assert hasattr(agent, "bind_tools"), "agent.bind_tools not implemented."
+
+class Agent(BaseModel):
+    name:str
+    prompt:SkipValidation[ChatPromptTemplate]=Field(default=None)
+    llm:SkipValidation[BaseChatModel]
+    tools:List[SkipValidation[BaseTool]]=Field(default_factory=list)
+    enter_tool:SkipValidation[BaseTool]=Field(default=None)
+    exit_tool:SkipValidation[BaseTool]=Field(default=None)
+
+    @model_validator(mode='after')
+    def after_validator(self):
+        assert hasattr(self.llm, "bind_tools"), "llm.bind_tools not implemented."
+        if self.prompt is None:
+            self.prompt = ChatPromptTemplate.from_messages([("placeholder", "{messages}")])
+        if self.enter_tool is None:
+            logger.warning(f".enter_tool not defined for agent '{self.name}', using default. It is strongly recommended to define a custom as_tool for each agent instead.")
+            self.enter_tool = StructuredTool.from_function(
+                func=lambda:f"The assistant is now {self.name}. Please reflect on the past conversation and assist the user as needed.",
+                description=f"Transfers work to {self.name}",
+                name=f"to_{self.name}"
+                )
+        if self.exit_tool is None:
+            logger.warning(f".exit_tool not defined for agent '{self.name}', using default. It is strongly recommended to define a custom as_tool for each agent instead.")
+            self.enter_tool = StructuredTool.from_function(
+                func=lambda to_ai:f"Resuming dialog with {to_ai}. Please reflect on the past conversation and assist the user as needed.",
+                description=f"Marks task of {self.name} complete or canceled.",
+                name=f"to_{self.name}"
+                )
+        return self
+
+    def to_node(self):
+        llm = (self.prompt | self.llm.bind_tools(self.tools))
+        def invoke(state, config: RunnableConfig):
+            return {
+                "pending_message": llm.invoke(state, config),
+                }
+        async def ainvoke(state, config: RunnableConfig):
+            return {
+                "pending_message": await llm.ainvoke(state, config),
+                }
+        return RunnableLambda(invoke, ainvoke, self.name)
+
+def process_pending_message(state:MultiAgentState, config:RunnableConfig, tool_to_other_agent:dict):
+    updates = {'pending_message':None}
+    pending_message = state['pending_message']
+    if not pending_message.tool_calls or not any(tc['name'] in tool_to_other_agent for tc in pending_message.tool_calls):
+        updates['messages'] = [pending_message]
     else:
-        content = ai_name # do not use this, just for easy testing
-    return StructuredTool.from_function(
-        func=lambda: (content, {"to_ai":ai_name}), # {"to_ai":ai_name} is IMPORTANT!
-        response_format='content_and_artifact', 
-        name=f"switch_to_{ai_name}_ai",
-        description=f"Transfers work to a specialized assistant {ai_name}. " + additional_description)
-
-# define state
-class State(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    current_ai: NotRequired[str]
-
-# define AI node
-class AINode:
-    def __init__(self, name:str, tools:List):
-        self.name = name
-        self.tools = tools
-    def __call__(self, state:State, config:RunnableConfig) -> State:
-        """ This one is fake, it just returns a random tool from the list or a message 
-        """
-        use_tool = random.choice([True, False])
-        if use_tool and self.tools:
-            tool:BaseTool = random.choice(self.tools)
-            tool_calls=[{'name': tool.name, 'args': {}, 'id': f'call_{uuid4()}', 'type': 'tool_call'}]
-            message = AIMessage(content="", tool_calls=tool_calls)
-        else:
-            message = AIMessage(content=f'I am {self.name}')
-        return {"messages":[message]}
-    def switch_ai_tool(self):
-        """ Tool switching back to this AI Node. Has to return artifact {"to_ai":ai_name}
-        """
-        return create_switch_ai_tool(self.name, 'foo')
-    def __repr__(self) -> str:
-        return f"AINode(name={self.name}, tools={self.tools})"
-
-
-
-def create_multiagent_graph(
-        boss_ai_nodes:List[AINode], 
-        sub_ai_nodes:List[AINode], 
-        start=START, end=END, 
-        builder:StateGraph|None=None,
-        ) -> StateGraph:
-    """ if there is no boss node, all agents can pass work to each other, default agent will be the first one in the list.
-    """
-    boss_ai_names = [node.name for node in boss_ai_nodes]
-    sub_ai_names = [node.name for node in sub_ai_nodes]
-
-    ai_nodes = boss_ai_nodes + sub_ai_nodes
-    assert len(ai_nodes) > 0, "Need at least one AI."
-    ai_names = boss_ai_names + sub_ai_names
-
-    # add the tool for switching between tasks
-    if boss_ai_nodes:
-        to_sub_ai_tools = [node.switch_ai_tool() for node in sub_ai_nodes]
-        to_boss_ai_tools = [node.switch_ai_tool() for node in boss_ai_nodes]
-
-        _ = [node.tools.extend(to_sub_ai_tools) for node in boss_ai_nodes]
-        _ = [node.tools.extend(to_boss_ai_tools) for node in sub_ai_nodes]
-    else:
-        # they can all talk to each other, yay!
-        for node in sub_ai_nodes:
-            node.tools.extend([n.switch_ai_tool() for n in sub_ai_nodes if n!=node])
-    to_ai_tool_names:Set[str] = {node.switch_ai_tool().name for node in ai_nodes}
-
-    # custom nodes
-    def route_to_ai(state):
-        """ Updates current_ai depending on previous message
-        """
-        # TODO: support parallel toolcalls yet
-        updates = {'messages':[]}
-        message = state['messages'][-1]
-        # no ai set yet, go to primary
-        if 'current_ai' not in state:
-            updates['current_ai'] = boss_ai_names[0] if boss_ai_names else sub_ai_names[0]
-        # previous tool call requires a switch, do it
-        if isinstance(message, ToolMessage) and  message.name in to_ai_tool_names:
-            updates['current_ai'] = message.artifact['to_ai']
-        return updates
-
-    # custom edges
-    def route_to_ai_or_end(state) -> Literal['route_to_ai', '__end__']:
-        """ Decides on where to go after tool calls
-        END if tool create artifact dict {"return_direct":True}"""
-        message = state['messages'][-1]
-        assert isinstance(message, ToolMessage)
-        if isinstance(message.artifact, dict) and message.artifact.get('return_direct'):
-            return "__end__"
-        return 'route_to_ai'
-
-
-    builder = builder or StateGraph(State)
-    if len(ai_nodes) > 1:
-        builder.add_edge(start, "route_to_ai")
-        builder.add_node("route_to_ai", route_to_ai)
-        builder.add_conditional_edges("route_to_ai", lambda state:state['current_ai'], {k:k for k in ai_names})
-    else:
-        builder.add_edge(start, ai_nodes[0].name)
-    # assistants
-    for ai_node in ai_nodes:
-        builder.add_node(ai_node.name, ai_node)
-        if ai_node.tools:
-            tools_node_name = f"{ai_node.name}_tools"
-            builder.add_conditional_edges(ai_node.name, tools_condition, {END:end, 'tools':tools_node_name})
-            builder.add_node(tools_node_name, ToolNode(ai_node.tools))
-            if len(ai_nodes) > 1:
-                builder.add_conditional_edges(tools_node_name, route_to_ai_or_end, {END:end, 'route_to_ai':'route_to_ai'})
+        valid_tool_calls = []
+        updates['current_ai'] = []
+        for tc in pending_message.tool_calls:
+            if tc['name'] in tool_to_other_agent:
+                updates['current_ai'].append(tool_to_other_agent[tc['name']])
             else:
-                builder.add_conditional_edges(tools_node_name, route_to_ai_or_end, {END:end, 'route_to_ai':node.name})
-        else:
-            builder.add_edge(ai_node.name, end)
+                valid_tool_calls.append(tc)
+        if valid_tool_calls:
+            pending_message.tool_calls = valid_tool_calls
+            updates['messages'] = [pending_message]
 
+    return updates
+
+
+def multi_agent_builder(
+    agents:List[Agent], # order matters, if there is no current ai, always routes to the first one
+    *,
+    builder:StateGraph | None = None,
+    start:str=START,
+    end:str=END,
+) -> StateGraph:
+    # assert stuff
+    assert len(agents) > 1, "Are you dumb? don't use multiagent if you have don't have multiple agents."
+    all_agent_names = [a.name for a in agents]
+    assert len(all_agent_names) == len(set(all_agent_names)), "All agents should have different names."
+    state_schema = builder.schema if builder else MultiAgentState
+    assert  'messages' in get_type_hints(state_schema), "Key 'messages' is missing from state_schema definition"
+    assert  'pending_message' in get_type_hints(state_schema), "Key 'pending_messages' is missing from state_schema definition"
+    assert  'current_agent' in get_type_hints(state_schema), "Key 'current_agent' is missing from state_schema definition"
+
+    # define tools node
+    added_tool_names = set()
+    all_tools = []
+    for agent in agents:
+        for tool in agent.tools + [agent.enter_tool]:
+            if tool.name not in added_tool_names:
+                added_tool_names.add(tool.name)
+                all_tools.append(tool)
+    tools_node = ToolNode(all_tools)
+
+    # nodes
+    ppm_node = RunnableLambda(
+        func = partial(process_pending_message, tool_to_other_agent={agent.enter_tool.name:agent.name for agent in agents}), 
+        name = 'process_pending_message')
+
+    # routes
+    def route_start(state:MultiAgentState):
+        current_agent = state.get('current_agent')
+        if current_agent:
+            return current_agent[-1]
+        return all_agent_names[0]
+    def route_process_pending_message(state:MultiAgentState):
+        if not state['messages'] or not isinstance(state['messages'][-1], AIMessage):
+            return route_start(state)
+        return tools_condition(state)
+
+    # build
+    builder = builder or StateGraph(state_schema)
+    builder.add_conditional_edges(start, route_start, all_agent_names)
+    for agent in agents:
+        builder.add_node(agent.name, agent.to_node())
+        builder.add_edge(agent.name, ppm_node.name)
+    builder.add_node(ppm_node.name, ppm_node)
+    builder.add_conditional_edges(ppm_node.name, route_process_pending_message, {END:end, "tools":tools_node.name, **{k:k for k in all_agent_names}})
+    builder.add_node('tools', tools_node)
+    builder.add_conditional_edges(tools_node.name, route_start, all_agent_names)
     return builder
+def save_graph():
+    import os
+    agents = [Agent(
+    name=name,
+    llm=MockChat(model=name),
+    tools=[mock_tool(f'{name}1'), mock_tool(f'{name}2')],
+    ) for name in ['primary','worker1','worker2']]
 
-def get_tool_node_names(nodes:List[AINode]):
-    return [f'{node.name}_tools' for node in nodes if node.tools]
+    graph = multi_agent_builder(agents).compile()
+
+    graph.get_graph(
+    # xray=True,
+    ).draw_mermaid_png(output_file_path=f'graphs/{os.path.splitext(os.path.basename(__file__))[0]}.png')

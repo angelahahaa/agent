@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime
+import time
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -28,27 +29,29 @@ class Agent:
                 ("placeholder", "{messages}"),
                 ])
             | self.llm.bind_tools(tools))
-
+memory = MemorySaver()
+start = time.time()
 normal_tools=[
-    tools.search_IT_procedure,
-    tools.search_user_projects,
+    # tools.search_IT_procedure,
+    # tools.search_user_projects,
     # tools.search_session_data,
-    tools.search_internet,
-    tools.get_jira_tickets,
-    tools.generate_images,
+    # tools.search_internet,
+    # tools.get_jira_tickets,
+    # tools.generate_images,
     ]
 sensitive_tools=[
     tools.create_jira_ticket,
-    tools.create_IT_fresh_service_ticket,
+    # tools.create_IT_fresh_service_ticket,
     ]
 all_tools = normal_tools + sensitive_tools
-memory = MemorySaver()
 graph = clarify_agent_builder(
-    runnable=Agent(ChatOpenAI(model="gpt-4o-mini", temperature=0)),
-    # runnable=Agent(MockChat(model="gpt-4o-mini", temperature=0)),
+    # runnable=Agent(ChatOpenAI(model="gpt-4o-mini", temperature=0)),
+    runnable=Agent(MockChat(model="gpt-4o-mini", temperature=0)),
     tools=normal_tools,
     sensitive_tools=sensitive_tools,
     ).compile(memory)
+end = time.time()
+print(f"initialize time: {end-start:.2f}s")
 graph.get_graph(
     # xray=True,
     ).draw_mermaid_png(output_file_path=f'graphs/{os.path.splitext(os.path.basename(__file__))[0]}.png')
