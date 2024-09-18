@@ -15,12 +15,13 @@ from chatbot.mocks import MockChat, mock_tool
 # from chatbot.agents.all_in_one import graph
 base_agent = Agent(
     name='base',
-    llm=MockChat(model='base'),
+    llm=MockChat(name='base',model='base'),
     tools=[mock_tool('base1'), mock_tool('base2')],
+    # exit_tool=None, # cannot exit base agent
 )
 worker1 = Agent(
     name='worker1',
-    llm=MockChat(model='worker1'),
+    llm=MockChat(name='worker1',model='worker1'),
     tools=[mock_tool('worker11'), mock_tool('worker12')],
 )
 worker1.tools.append(base_agent.enter_tool)
@@ -42,7 +43,7 @@ def print_messages_without_duplicates(messages:List[BaseMessage], id_tracker:Set
 
 config = {"configurable":{"thread_id":str(uuid4()), 'email':'pengshiya'}}
 msgs = [
-    HumanMessage(content="worker1"),
+    HumanMessage(content="hi"),
     # HumanMessage(content="What tasks do I have?"),
     # HumanMessage(content="Great, thanks! I need some inspiration for my designs. Could you help me find some references about cyberpunk?"),
     # HumanMessage(content="I need to install substance painter."),
