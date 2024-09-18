@@ -1,4 +1,5 @@
 import os
+import time
 
 import dotenv
 
@@ -33,7 +34,8 @@ from chatbot.database import vector_db
 #             ),
 #         )
 # == agent
-from chatbot.agents.jira import graph, all_tools
+from chatbot.agents.all_in_one import graph, all_tools
+
 # == application
 
 
@@ -86,6 +88,15 @@ def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
                     temp_file.write(image_data)
                     content = {"path":temp_file.name}
                 gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
+            elif msg.name == 'generate_images':
+                # customise how we display this
+                encoded_images = msg.artifact['images']
+                for encoded_image in encoded_images:
+                    image_data = base64.b64decode(encoded_image)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+                        temp_file.write(image_data)
+                        content = {"path":temp_file.name}
+                    gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
             else:
                 pass
         elif isinstance(msg, SystemMessage):
@@ -179,9 +190,14 @@ def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict,
         graph_input = {"messages": pending_messages + messages}
     
     for _ in range(10): # max 10 interactions before we get angry
-        events = graph.stream(graph_input, config, stream_mode="values")
+        events = graph.stream(graph_input, config, stream_mode="values", interrupt_before="tools")
         messages = []
         for event in events:
+            print("===")
+            for k,v in event.items():
+                if k!='messages':
+                    print(f"{k:>10}: {v}" )
+            print("===")
             messages = event.get('messages')
             if not messages:
                 continue
@@ -284,13 +300,17 @@ with gr.Blocks() as demo:
                     sources = gr.Markdown()
                     upload_file_button = gr.UploadButton(size='sm')
                     url = gr.Text(container=False, placeholder='link to the file')
+            with gr.Row():
+                demo_button = gr.Button('demo', size='sm', min_width=60)
+                cancel_demo_button = gr.Button('cancel', size='sm', min_width=60)
             with gr.Accordion("Advanced Options", open=False):
-                model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
-                temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
+                # model_name = gr.Radio(['gpt-3.5-turbo', 'gpt-4o'], value=default_configurable['llm/model_name'], label='model name')
+                # temperature = gr.Slider(0,1,label='temperature', value=default_configurable['llm/temperature'])
                 ask_tools = gr.CheckboxGroup(
                     choices=sorted([t.name for t in all_tools]), 
                     value=default_ask,label='Ask before using these tools')
-            # debugging stuff
+                
+        # chat session
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")
             message = gr.Text(placeholder='enter message', container=False)
@@ -305,8 +325,8 @@ with gr.Blocks() as demo:
     session_id.change(fn=_on_session_change, inputs=[user_state, session_id], outputs=[user_state, chatbot, sources])
     new_session_button.click(fn=_new_session, inputs=[user_state], outputs=[user_state, session_id])
     clear_sessions_button.click(fn=_clear_sessions, inputs=[user_state], outputs=[user_state, session_id])
-    model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
-    temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
+    # model_name.input(fn=lambda us, v:_update_configurable(us, 'llm/model_name', v), inputs=[user_state, model_name], outputs=[user_state])
+    # temperature.input(fn=lambda us, v:_update_configurable(us, 'llm/temperature', v), inputs=[user_state, temperature], outputs=[user_state])
     ask_tools.change(fn=lambda us, v:{**us, 'ask':v}, inputs=[user_state, ask_tools], outputs=[user_state])
     # ask_human.input(fn=lambda us, v:_update_configurable(us, 'tools/ask_human', v), inputs=[user_state, ask_human], outputs=[user_state])
 
@@ -326,6 +346,31 @@ with gr.Blocks() as demo:
             inputs=[user_state, btn, chatbot],
             outputs=[user_state, chatbot],
         )
+
+    # just for demo
+    def _start_demo(user_state, history):
+        messages = [
+            "hi",
+            "is there any pending actions for me?",
+            "i want to fix that texture bug, create an implementation jira ticket.",
+            "description is fix on substance painter, priority medium, label bugfix.",
+            "yes.",
+            "help me install substance painter.",
+            "but i need version 1.5.",
+            "yes, use this jira ticket as description.",
+            "thanks, can you also search for some Cyberpunk 2077 references for my design?",
+            "great, also generate some cyberpunk cityscape images.",
+        ]
+        for msg in messages:
+            for i in range(len(msg)):
+                time.sleep(0.05)
+                yield {message:msg[:i]}
+            gen = _send_message_and_clear_input(user_state, msg, None, history)
+            for user_state, msg, _, history in gen:
+                yield {message: msg, chatbot: history}
+        return
+    start_demo_evt = demo_button.click(fn=_start_demo, inputs=[user_state, chatbot], outputs=[message, chatbot])
+    cancel_demo_button.click(lambda :None, [], [], cancels=[start_demo_evt])
 
     # debug stuff
     with gr.Accordion("Debug",open=False):

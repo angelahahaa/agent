@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from chatbot import tools
-from chatbot.agents.jira import graph
+from chatbot.agents.all_in_one import graph
 
 def print_messages_without_duplicates(messages:List[BaseMessage], id_tracker:Set|None=None):
     id_tracker = set() if id_tracker is None else id_tracker
@@ -26,6 +26,9 @@ def print_messages_without_duplicates(messages:List[BaseMessage], id_tracker:Set
 
 config = {"configurable":{"thread_id":str(uuid4()), 'email':'pengshiya'}}
 msgs = [
+    # HumanMessage(content="What tasks do I have?"),
+    # HumanMessage(content="Great, thanks! I need some inspiration for my designs. Could you help me find some references about cyberpunk?"),
+    # HumanMessage(content="I need to install substance painter."),
     # HumanMessage(content="quack"),
     # HumanMessage(content="create jira ticket"),
     # HumanMessage(content="create one for implementing pgadmin, fill everything else in for me."),
