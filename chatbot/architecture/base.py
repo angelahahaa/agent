@@ -6,7 +6,7 @@ from langgraph.graph import END
 from langgraph.graph.message import AnyMessage, add_messages
 from typing_extensions import TypedDict
 
-from chatbot.architecture.multiagent import State
+from chatbot.architecture._multiagent import State
 
 
 class State(TypedDict):

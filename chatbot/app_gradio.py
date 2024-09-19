@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import time
 
@@ -34,7 +35,7 @@ from chatbot.database import vector_db
 #             ),
 #         )
 # == agent
-from chatbot.agents.all_in_one import graph, all_tools
+from chatbot.agents.all_multiagent import graph, all_tools
 
 # == application
 
@@ -48,6 +49,31 @@ default_prompts = ['approve','improve answer by referenceing my database.','impr
 
 def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
     gr_msgs = []
+    tc_id_to_msgs = defaultdict(lambda:{'content':'','messages':[]})
+    # filter out all tool result messages first
+    for msg in lc_msgs:
+        if isinstance(msg, ToolMessage):
+            tc_id_to_msgs[msg.tool_call_id]['content'] = msg.content
+            if msg.name == 'generate_image_with_text':
+                # customise how we display this
+                encoded_image = msg.artifact['image']
+                image_data = base64.b64decode(encoded_image)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+                    temp_file.write(image_data)
+                    content = {"path":temp_file.name}
+                tc_id_to_msgs[msg.tool_call_id]['messages'].append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
+            elif msg.name == 'generate_images':
+                # customise how we display this
+                encoded_images = msg.artifact['images']
+                image_paths = []
+                for encoded_image in encoded_images:
+                    image_data = base64.b64decode(encoded_image)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+                        temp_file.write(image_data)
+                        image_paths.append(temp_file.name)
+                tc_id_to_msgs[msg.tool_call_id]['messages'].append(gr.ChatMessage(role="assistant",content=gr.Gallery(image_paths, object_fit='contain')))
+            else:
+                pass
     for msg in lc_msgs:
         if isinstance(msg, HumanMessage):
             contents = []
@@ -74,33 +100,15 @@ def _lc_to_gr_msgs(lc_msgs:List[BaseMessage]) -> List[gr.ChatMessage]:
         elif isinstance(msg, AIMessage):
             if msg.tool_calls:
                 for tool_call in msg.tool_calls:
-                    content = "\n".join([f"{k}={v}" for k,v in tool_call['args'].items()])
-                    gr_msgs.append(gr.ChatMessage(role="assistant",content=content, metadata={'title':f"Request: {tool_call['name']}"}))
+                    content = "== args ==\n" + "\n".join([f"{k}={v}" for k,v in tool_call['args'].items()])
+                    gr_msgs.append(gr.ChatMessage(role="assistant",content=content, metadata={'title':f"Tool: {tool_call['name']}"}))
+                    if tool_call['id'] in tc_id_to_msgs:
+                        results = tc_id_to_msgs[tool_call['id']]
+                        gr_msgs[-1].content += f'\n== results ==\n{results['content']}'
+                        results = tc_id_to_msgs[tool_call['id']]
+                        gr_msgs.extend(results['messages'])
             else:
                 gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content))
-        elif isinstance(msg, ToolMessage):
-            gr_msgs.append(gr.ChatMessage(role="assistant",content=msg.content, metadata={'title': f"Results: {msg.name}"}))
-            if msg.name == 'generate_image_with_text':
-                # customise how we display this
-                encoded_image = msg.artifact['image']
-                image_data = base64.b64decode(encoded_image)
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
-                    temp_file.write(image_data)
-                    content = {"path":temp_file.name}
-                gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
-            elif msg.name == 'generate_images':
-                # customise how we display this
-                encoded_images = msg.artifact['images']
-                for encoded_image in encoded_images:
-                    image_data = base64.b64decode(encoded_image)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
-                        temp_file.write(image_data)
-                        content = {"path":temp_file.name}
-                    gr_msgs.append(gr.ChatMessage(role="assistant",content={"path":temp_file.name}))
-            else:
-                pass
-        elif isinstance(msg, SystemMessage):
-            ...
     return gr_msgs
 
 def _new_session(user_state):
@@ -300,7 +308,8 @@ with gr.Blocks() as demo:
                     sources = gr.Markdown()
                     upload_file_button = gr.UploadButton(size='sm')
                     url = gr.Text(container=False, placeholder='link to the file')
-            with gr.Row():
+            # demo stuff
+            with gr.Row(visible=False):
                 demo_button = gr.Button('demo', size='sm', min_width=60)
                 cancel_demo_button = gr.Button('cancel', size='sm', min_width=60)
             with gr.Accordion("Advanced Options", open=False):
@@ -314,7 +323,8 @@ with gr.Blocks() as demo:
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(type='messages', height="70vh")
             message = gr.Text(placeholder='enter message', container=False)
-            with gr.Row():
+            # default prompts
+            with gr.Row(visible=False):
                 default_prompt_buttons = [
                     gr.Button(prompt, size='sm')
                 for prompt in default_prompts]
@@ -356,7 +366,7 @@ with gr.Blocks() as demo:
             "description is fix on substance painter, priority medium, label bugfix.",
             "yes.",
             "help me install substance painter.",
-            "but i need version 1.5.",
+            "i need version 1.5.",
             "yes, use this jira ticket as description.",
             "thanks, can you also search for some Cyberpunk 2077 references for my design?",
             "great, also generate some cyberpunk cityscape images.",

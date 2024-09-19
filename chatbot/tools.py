@@ -10,7 +10,7 @@ from langchain_core.tools import BaseTool, tool
 from chatbot.database import vector_db
 import requests
 @tool
-def search_user_projects():
+def get_user_projects():
     """Returns a list of latest project the user is currently working on from internal database.
     """
     return [{
@@ -66,7 +66,7 @@ def get_session_data_summary(config:RunnableConfig) -> str:
     return f"Session has data from sources: {data['data_source']}"
 
 @tool
-def get_user_info(config: RunnableConfig, include_session_data_summary=True) -> Dict:
+def get_user_info(config: RunnableConfig) -> Dict:
     """ Fetch all user information.
     Returns:
         A dictionary of user information. Returns an empty dictionary if no user information found.
@@ -82,9 +82,6 @@ def get_user_info(config: RunnableConfig, include_session_data_summary=True) -> 
         info =  {'name':'Ma Yuyong', 'department':'RnD', 'studio':'SHA', 'position':'Senior Producer', 'location':'Shanghai'}
     elif 'art' in email:
         info =  {'name':'Jane Doe', 'department':'Art', 'studio':'CDU', 'position':'Art Director', 'location':'Chengdu'}
-    if include_session_data_summary:
-        session_data_summary = get_session_data_summary.with_config(config).invoke({})
-        info['session_data_summary'] = session_data_summary
     return info
 
 @tool(response_format='content_and_artifact')
@@ -115,7 +112,8 @@ def generate_images(
         "parameters": {"num_images_per_prompt":num_images_per_prompt}
     }
     response = requests.post(url, headers=headers, json=payload)
-    return "Images generated and displayed to user.", {'images':response.json()['images'], 'return_direct':True}
+    return "Images generated and displayed to user. Assistant should not attempt to show the images.", \
+        {'images':response.json()['images'], 'return_direct':True}
 
 @tool(response_format='content_and_artifact')
 def generate_image_with_text(text:str, size=(256,256)):
@@ -178,7 +176,7 @@ def get_jira_tickets(
               Each dictionary contains information about a single ticket.
     """
     # Mock implementation: return an empty list of tickets
-    if 'cyberpunk' in project_name:
+    if 'cyberpunk' in project_name or project_name=='*':
         return [
             {'key': f'JIRA-{random.randint(0,9999):04}','link':'http://exmple.com/', 'title':'Texture tiling issue at scene 1-3.'},
             {'key': f'JIRA-{random.randint(0,9999):04}','link':'http://exmple.com/', 'title':'NPC dialogue not loading properly in the tutorial phase.'},
