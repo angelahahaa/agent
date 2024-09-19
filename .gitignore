@@ -5,3 +5,5 @@ __pycache__
 *.db
 *.sqlite*
 databases/*
+.venv
+.pytest_cache

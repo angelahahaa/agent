@@ -41,7 +41,7 @@ class Agent(BaseModel):
     prompt:SkipValidation[ChatPromptTemplate]=Field(default=None)
     llm:SkipValidation[BaseChatModel]
     tools:List[SkipValidation[BaseTool]]=Field(default_factory=list)
-    enter_tool:SkipValidation[BaseTool]=Field(default='default')
+    enter_tool:SkipValidation[BaseTool]|None=Field(default='default')
     exit_tool:SkipValidation[BaseTool]|None=Field(default='default')
 
     @model_validator(mode='after')
@@ -80,24 +80,24 @@ class Agent(BaseModel):
                 }
         return RunnableLambda(invoke, ainvoke, self.name)
 
-def process_pending_message(state:MultiAgentState, config:RunnableConfig, enter_tools:dict, exit_tools:set):
+def process_pending_message(state:MultiAgentState, config:RunnableConfig, switch_agent_tools:dict):
     updates = {'pending_message':None}
     pending_message = state['pending_message']
-    if not pending_message.tool_calls or not any(tc['name'] in enter_tools for tc in pending_message.tool_calls):
+    if not pending_message.tool_calls or not \
+        any(tc['name'] in switch_agent_tools for tc in pending_message.tool_calls):
         updates['messages'] = [pending_message]
     else:
         # valid_tool_calls = []
         updates['current_agent'] = []
         for tc in pending_message.tool_calls:
-            if tc['name'] in enter_tools:
-                updates['current_agent'].append(enter_tools[tc['name']])
-            elif tc['name'] in exit_tools:
-                updates['current_agent'].append(POP)
-            # else:
-            #     valid_tool_calls.append(tc)
+            if tc['name'] in switch_agent_tools:
+                updates['current_agent'].append(switch_agent_tools[tc['name']])
+        #     else:
+        #         valid_tool_calls.append(tc)
         # if valid_tool_calls:
         #     pending_message.tool_calls = valid_tool_calls
-    updates['messages'] = [pending_message]
+        if pending_message.tool_calls or pending_message.content:
+            updates['messages'] = [pending_message]
 
     return updates
 
@@ -129,10 +129,12 @@ def multi_agent_builder(
     tools_node = ToolNode(all_tools)
 
     # nodes
+    switch_agent_tools = {agent.enter_tool.name:agent.name for agent in agents if agent.enter_tool}
+    switch_agent_tools.update({agent.exit_tool.name:POP for agent in agents if agent.exit_tool})
+    # TODO: check if there are any tools that is both a 'enter_tool' and 'exit_tool'
     ppm_node = RunnableLambda(
         func = partial(process_pending_message, 
-                       enter_tools={agent.enter_tool.name:agent.name for agent in agents},
-                       exit_tools={agent.exit_tool.name for agent in agents if agent.exit_tool},
+                       switch_agent_tools=switch_agent_tools,
                        ), 
         name = 'process_pending_message')
     def select_agent(state:MultiAgentState):
