@@ -30,11 +30,8 @@ def extend_or_pop(left:List[str], right:List[str]):
 
 class MultiAgentState(TypedDict):
     messages:Annotated[AnyMessage, add_messages]
-    current_agent:Annotated[List[str], extend_or_pop]
-    pending_message:AIMessage
+    agents:Annotated[List[str], extend_or_pop]
 
-def assert_has_bind_tools(agent):
-    assert hasattr(agent, "bind_tools"), "agent.bind_tools not implemented."
 
 class Agent(BaseModel):
     name:str
@@ -72,35 +69,24 @@ class Agent(BaseModel):
         llm = (self.prompt | self.llm.bind_tools(tools))
         def invoke(state, config: RunnableConfig):
             return {
-                "pending_message": llm.invoke(state, config),
+                "messages": [llm.invoke(state, config)],
                 }
         async def ainvoke(state, config: RunnableConfig):
             return {
-                "pending_message": await llm.ainvoke(state, config),
+                "messages": [await llm.ainvoke(state, config)],
                 }
         return RunnableLambda(invoke, ainvoke, self.name)
 
-def process_pending_message(state:MultiAgentState, config:RunnableConfig, switch_agent_tools:dict):
-    updates = {'pending_message':None}
-    pending_message = state['pending_message']
-    if not pending_message.tool_calls or not \
-        any(tc['name'] in switch_agent_tools for tc in pending_message.tool_calls):
-        updates['messages'] = [pending_message]
-    else:
-        # valid_tool_calls = []
-        updates['current_agent'] = []
-        for tc in pending_message.tool_calls:
-            if tc['name'] in switch_agent_tools:
-                updates['current_agent'].append(switch_agent_tools[tc['name']])
-        #     else:
-        #         valid_tool_calls.append(tc)
-        # if valid_tool_calls:
-        #     pending_message.tool_calls = valid_tool_calls
-        if pending_message.tool_calls or pending_message.content:
-            updates['messages'] = [pending_message]
-
+def update_agents(state:MultiAgentState, config:RunnableConfig, switch_agent_tools:dict):
+    message = state['messages'][-1]
+    updates = {'agents':[]}
+    for tc in message.tool_calls:
+        if tc['name'] in switch_agent_tools:
+            updates['agents'].append(switch_agent_tools[tc['name']])
     return updates
 
+def select_agent(state:MultiAgentState, config:RunnableConfig, default_agent:str):
+    return {'agents':[] if state.get('agents') else [default_agent]}
 
 def multi_agent_builder(
     agents:List[Agent], # order matters, if there is no current ai, always routes to the first one
@@ -115,8 +101,7 @@ def multi_agent_builder(
     assert len(all_agent_names) == len(set(all_agent_names)), "All agents should have different names."
     state_schema = builder.schema if builder else MultiAgentState
     assert  'messages' in get_type_hints(state_schema), "Key 'messages' is missing from state_schema definition"
-    assert  'pending_message' in get_type_hints(state_schema), "Key 'pending_messages' is missing from state_schema definition"
-    assert  'current_agent' in get_type_hints(state_schema), "Key 'current_agent' is missing from state_schema definition"
+    assert  'agents' in get_type_hints(state_schema), "Key 'agents' is missing from state_schema definition"
 
     # define tools node
     added_tool_names = set()
@@ -132,34 +117,31 @@ def multi_agent_builder(
     switch_agent_tools = {agent.enter_tool.name:agent.name for agent in agents if agent.enter_tool}
     switch_agent_tools.update({agent.exit_tool.name:POP for agent in agents if agent.exit_tool})
     # TODO: check if there are any tools that is both a 'enter_tool' and 'exit_tool'
-    ppm_node = RunnableLambda(
-        func = partial(process_pending_message, 
+    update_agents_node = RunnableLambda(
+        func = partial(update_agents, 
                        switch_agent_tools=switch_agent_tools,
                        ), 
-        name = 'process_pending_message')
-    def select_agent(state:MultiAgentState):
-        return {'current_agent':[] if state.get('current_agent') else [all_agent_names[0]]}
-
-
-    # routes
-    def route_process_pending_message(state:MultiAgentState):
-        if not state['messages'] or not isinstance(state['messages'][-1], AIMessage):
-            return 'select_agent'
-        return tools_condition(state)
+        name = "update_agents")
+    select_agent_node = RunnableLambda(
+        func = partial(select_agent, 
+                       default_agent=all_agent_names[0],
+                       ), 
+        name = "select_agent")
 
     # build
     builder = builder or StateGraph(state_schema)
-    builder.add_edge(start, 'select_agent')
-    builder.add_node('select_agent', select_agent)
-    builder.add_conditional_edges('select_agent', lambda s:s['current_agent'][-1], all_agent_names)
+    builder.add_edge(start, select_agent_node.name)
+    builder.add_node(select_agent_node.name, select_agent_node)
+    builder.add_conditional_edges(select_agent_node.name, lambda s:s['agents'][-1], all_agent_names)
     for agent in agents:
         builder.add_node(agent.name, agent.to_node())
-        builder.add_edge(agent.name, ppm_node.name)
-    builder.add_node(ppm_node.name, ppm_node)
-    builder.add_conditional_edges(ppm_node.name, route_process_pending_message, {END:end, "tools":tools_node.name, 'select_agent':'select_agent'})
-    builder.add_node('tools', tools_node)
-    builder.add_edge(tools_node.name, 'select_agent')
+        builder.add_edge(agent.name, update_agents_node.name)
+    builder.add_node(update_agents_node.name, update_agents_node)
+    builder.add_conditional_edges(update_agents_node.name, tools_condition, {END:end, "tools":tools_node.name})
+    builder.add_node(tools_node.name, tools_node)
+    builder.add_edge(tools_node.name, select_agent_node.name)
     return builder
+
 def save_graph():
     import os
     agents = [Agent(

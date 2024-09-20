@@ -12,7 +12,7 @@ import base64
 import tempfile
 # exit()
 import uuid
-from typing import Dict, Generator, List, Tuple
+from typing import AsyncGenerator, Dict, Generator, List, Tuple
 
 import gradio as gr
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
@@ -166,7 +166,7 @@ def _update_sources(user_state):
     else:
         return "Nothing here"
 
-def _send_message(user_state, message, images, history) -> Generator[Tuple[Dict, List[gr.ChatMessage] | Dict], None, None]:
+async def _send_message(user_state, message, images, history) -> AsyncGenerator[Tuple[Dict, List[gr.ChatMessage] | Dict], None, None]:
     config = user_state['config']
     ask = user_state.get('ask') or []
     messages = []
