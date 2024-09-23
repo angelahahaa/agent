@@ -142,20 +142,17 @@ def _update_configurable(user_state, key, value):
         del configurable[key]
     return user_state
 
-def _human_tool_input(snapshot, message):
-    if message.lower().strip() in ['ok','y','1','approve']:
-        return None
-    else:
-        tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
-        return {
-                "messages": [
-                    ToolMessage(
-                        tool_call_id=tool_call_id,
-                        content=f"API call denied by user. Reasoning: '{message}'. Continue assisting, accounting for the user's input.",
-                        name='user_denied'
-                    )
-                ]
-            }
+def _is_human_approve(message):
+    return message.lower().strip() in ['ok','y','1','approve']
+
+def _to_deny_tool_message(snapshot, message) -> ToolMessage:
+    tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
+    return ToolMessage(
+                    tool_call_id=tool_call_id,
+                    content=f"API call denied by user. Reasoning: '{message}'. Continue assisting, accounting for the user's input.",
+                    artifact={"message":message},
+                    name='user_denied'
+                )
 
 def _update_sources(user_state):
     collection_name = user_state['config']['configurable']["thread_id"]
@@ -171,6 +168,7 @@ async def _send_message(user_state, message, images, history) -> AsyncGenerator[
     ask = user_state.get('ask') or []
     messages = []
     history = history or []
+    # prepare user inputs
     if images:
         for image in images:
             with open(image[0], 'rb') as f:
@@ -185,20 +183,22 @@ async def _send_message(user_state, message, images, history) -> AsyncGenerator[
     if message:
         messages.append(HumanMessage(message))
     history.extend(_lc_to_gr_msgs(messages))
-    yield user_state, history
-
+    # check if we are expecting an approval 
     snapshot = graph.get_state(config)
-    if snapshot.next and 'tool' in snapshot.next[0]:
+    if snapshot.next and 'tools' in snapshot.next[0]:
         # langchain expecting Human's confirmation (or deny)
-        graph_input = _human_tool_input(snapshot, message)
+        human_tool_message = _to_deny_tool_message(snapshot, message)
+        if human_tool_message:
+            messages.append(human_tool_message)
         yield user_state, history[:-1] + _lc_to_gr_msgs(graph_input['messages']) if graph_input else []
     else:
         pending_messages = [HumanMessage(content=message) for message in user_state.get('pending_messages')]
         user_state['pending_messages'] = []
         graph_input = {"messages": pending_messages + messages}
+    yield user_state, history
     
     for _ in range(10): # max 10 interactions before we get angry
-        events = graph.stream(graph_input, config, stream_mode="values", interrupt_before="tools")
+        events = graph.astream_events(graph_input, config, version='v2')
         messages = []
         for event in events:
             print("===")
@@ -213,6 +213,7 @@ async def _send_message(user_state, message, images, history) -> AsyncGenerator[
                 messages = [messages]
             history = _lc_to_gr_msgs(messages)
             yield user_state, history
+        # print tool call confirmation
         if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
             # conversation is not complete, AI waiting for confirmation
             if ask and any(tool_call['name'] in set(ask) for tool_call in messages[-1].tool_calls):
