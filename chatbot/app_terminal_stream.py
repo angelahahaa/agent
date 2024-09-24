@@ -19,6 +19,8 @@ from chatbot.agents.all_multiagent import graph
 from chatbot.architecture.multiagent import Agent, multi_agent_builder
 from chatbot.mocks import MockChat, mock_tool
 
+print(graph.graph_schema().schema())
+exit()
 def print_event(event):
     print(f"==== {event['event']:<20} : {event['name']:<20} ====")
 
@@ -67,7 +69,8 @@ async def main():
                 inputs = {"messages":[msg]}
             events = graph.astream_events(
                 inputs, config, 
-                version='v2')
+                version='v2',
+                )
             async for event in events:
                 if event['event'] == "on_chat_model_start":
                     print_event(event)
