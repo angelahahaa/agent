@@ -29,7 +29,7 @@ from fastapi import FastAPI, HTTPException
 from typing import Dict
 import uuid
 from typing import List, Dict, Any
-from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Request, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, SkipValidation, model_validator, Field, EmailStr
 from pydantic_core import PydanticCustomError
@@ -79,7 +79,7 @@ class InputModel(BaseModel):
 
 
 class ConfigurableModel(BaseModel):
-    thread_id: str
+    session_id: UUID = Field(serialization_alias='thread_id')
     email: str | None = Field(None, examples=['angela@abc.com'], description="will be extracted from jwt token if not given.")
 
 
@@ -97,7 +97,7 @@ def get_config(
         decoded_token = jwt.decode(token, options={"verify_signature": False})
         email = decoded_token.get("email")
         config.configurable.email = email
-    return config.model_dump()
+    return config.model_dump(by_alias=True)
 
 def get_input(
     input: InputModel,
@@ -153,6 +153,15 @@ async def chat_invoke(request: Request, graph_input: Dict = Depends(get_input), 
         if is_new_message:
             new_messages.append(message.dict(exclude=exclude_message_fields))
     return {"messages":new_messages}
+
+@router.get("/chat/history")
+def get_chat_history(session_id: UUID = Query(...)):
+    # TODO: validate bearer token that the user has permission to this session history
+    state = graph.get_state(config=RunnableConfig(configurable={"thread_id":session_id}))
+    messages = [ message.dict(exclude=exclude_message_fields) for message in state.values.get('messages',[])]
+    return {"messages": messages}
+
+
 
 
 
