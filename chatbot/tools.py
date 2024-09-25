@@ -72,7 +72,7 @@ def get_user_info(config: RunnableConfig) -> Dict:
         A dictionary of user information. Returns an empty dictionary if no user information found.
     """
     configuration = config.get("configurable", {})
-    email = configuration.get("email", "")
+    email = configuration.get("email", configuration.get("user_id",""))
     info = {}
     if ('angela' in email) or ('shiya' in email):
         info = {'name':'Peng Shiya', 'department':'RnD', 'studio':'SHA', 'position':'Engineer', 'location':'Shanghai'}

@@ -3,7 +3,7 @@ import dotenv
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, AsyncIterator, Literal, NotRequired, TypeVar
+from typing import Annotated, AsyncIterator, Literal, NotRequired, Tuple, TypeVar, TypedDict
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -25,13 +25,14 @@ from langgraph.graph import START, StateGraph
 from chatbot import tools
 from chatbot.architecture._multiagent import (AINode, State, create_multiagent_graph)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Path
 from typing import Dict
 import uuid
 from typing import List, Dict, Any
 from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Request, status, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, SkipValidation, model_validator, Field, EmailStr
+from annotated_types import Len
 from pydantic_core import PydanticCustomError
 
 from uuid import uuid4
@@ -44,125 +45,207 @@ from chatbot.agents.all_multiagent import graph
 from langchain_core.runnables.schema import StreamEvent
 import jwt
 
+from langgraph.errors import EmptyInputError
+
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 # eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InBlbmdzaGl5YUBhYmMuY29tIn0.jLG70Fquz2t-iFrLbTusjCjcvCRFTju9SV5IX4rwlDE
-# schemas
-class OpenAIMessage(BaseModel):
-    role: Literal['user', 'system', 'tool_deny']
-    content: str | List[str | Dict] = Field(..., examples=['hi'])
-    tool_call_id: str | None = Field(None, examples=['call_Jja7J89XsjrOLA5r!MEOW!SL'])
+MSG_EXCLUDE = {'additional_kwargs','response_metadata','example','invalid_tool_calls','usage_metadata','tool_call_chunks'}
 
-    @model_validator(mode='after')
-    def check_tool_call_id(self):
-        if self.role == 'tool_deny':
-            if not self.tool_call_id:
-                raise PydanticCustomError(
-                    'tool_call_id_missing',
-                    'expected tool_call_id',
-                )
-        return self
+# JSON schemas
 
-    def to_lc_message(self) -> BaseMessage:
-        if self.role == 'user':
-            return HumanMessage(content=self.content, id=str(uuid4()))
-        if self.role == 'system':
-            return SystemMessage(content=self.content, id=str(uuid4()))
-        if self.role == 'tool_deny':
-            # TODO: fill in
-            return ToolMessage(content=self.content, id=str(uuid4()))
-        raise NotImplementedError()
+class Session(BaseModel):
+    session_id:UUID
 
+class ToolDenyMessage(BaseModel):
+    type: Literal['tool_deny'] = Field('tool_deny')
+    tool_call_id: str = Field(..., examples=['call_Jja7J89XsjrOLA5r!MEOW!SL'])
+    content: str = Field(..., examples=['look somewhere else.'])
 
-class InputModel(BaseModel):
-    messages: List[OpenAIMessage]
+class ToolDenyInput(BaseModel):
+    messages: Annotated[List[ToolDenyMessage], Len(min_length=1)]
 
+class ChatMessage(BaseModel):
+    type: Literal['human', 'system']
+    content: str | List[str | Dict] = Field(..., examples=['hi'], description="Only for human and system messages")
 
-class ConfigurableModel(BaseModel):
-    session_id: UUID = Field(serialization_alias='thread_id')
-    email: str | None = Field(None, examples=['angela@abc.com'], description="will be extracted from jwt token if not given.")
+class ChatInput(BaseModel):
+    messages: Annotated[List[ChatMessage], Len(min_length=1)]
+
+class Configurable(BaseModel):
+    foo:str|None = ""
+
+class ChatConfig(BaseModel):
+    configurable: Configurable = Field(default_factory=Configurable)
+
+session_id_param = Path(..., example=uuid4())
 
 
-class ConfigModel(BaseModel):
-    configurable: ConfigurableModel
-
-# fns
+# convert between JSON and python objects
 bearer_scheme = HTTPBearer(auto_error=False)
-def get_config(
-    config: ConfigModel, 
-    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
-) -> ConfigModel:
+
+def api_to_lc_message(message:ChatMessage|ToolDenyMessage) -> BaseMessage:
+    if isinstance(message, ChatMessage):
+        if message.type == 'human':
+            return HumanMessage(content=message.content, id=str(uuid4()))
+        if message.type == 'system':
+            return SystemMessage(content=message.content, id=str(uuid4()))
+    if isinstance(message, ToolDenyMessage):
+        return ToolMessage(
+            name="tool_deny",
+            content=f"Tool call denied by user. Reasoning: '{message.content}'. Continue assisting, accounting for the user's input.", 
+            tool_call_id=message.tool_call_id,
+            id=str(uuid4()), artifact={"reason":message.content})
+    raise ValueError(f"Unexpected message: {message}")
+    
+def get_decoded_jwt(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)):
     if credentials:
         token = credentials.credentials
-        decoded_token = jwt.decode(token, options={"verify_signature": False})
-        email = decoded_token.get("email")
-        config.configurable.email = email
-    return config.model_dump(by_alias=True)
+        return jwt.decode(token, options={"verify_signature": False})
+    return {}
 
-def get_input(
-    input: InputModel,
-):
-    return {"messages":[msg.to_lc_message() for msg in input.messages]}
+def get_user_id(decoded_jwt: Dict = Depends(get_decoded_jwt)) -> str:
+    # TODO: error if no user_id
+    return decoded_jwt.get("preferred_username","")
 
-def to_sse_format(event: str, data: str | None):
-    event_str = f"event: {event}\n"
+def get_graph_config(
+    config: ChatConfig = Body(...), 
+    user_id: str = Depends(get_user_id), 
+    session_id: UUID = session_id_param,
+) -> Dict:
+    config = config.model_dump(by_alias=True)
+    config['configurable']['user_id'] = user_id
+    config['configurable']['thread_id'] = session_id
+    return  config
+
+def get_graph_input(
+    input: ChatInput | None = Body(None),
+) -> Dict|None:
+    return None if input is None else {"messages": [api_to_lc_message(msg) for msg in input.messages]}
+
+def verify_input_for_state(input:Dict|None, config:Dict):
+    next_is_tools = "tools" in graph.get_state(config=config).next
+    if next_is_tools and input is not None:
+        raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"input must be null."
+            )
+    if not next_is_tools and input is None:
+        raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"input must not be null."
+            )
+def lc_to_api_message(message:BaseMessage, include=None, exclude=MSG_EXCLUDE) -> dict:
+    return message.dict(include=include, exclude=exclude)
+
+def sse_event(event:Literal['error']|None=None, data:dict|None=None):
+    s = ''
+    if event:
+        s += f"event: {event}\n"
     if data:
-        event_str += f"data: {data}\n"
-    event_str += "\n"
-    return event_str.encode('utf-8')
+        s += f"data: {json.dumps(data)}\n"
+    s += '\n'
+    return s.encode('utf-8')
 
-
-async def to_streaming_gen(astream_events: AsyncIterator[StreamEvent]) -> AsyncIterator[StreamEvent]:
-    async for item in astream_events:
-        if item['event'] == "on_chat_model_stream":
-            message: AIMessageChunk = item['data']["chunk"]
-            if message.content:
-                yield to_sse_format(event=item['event'], data=message.json(include={'content'}))
-        elif item['event'] == "on_chat_model_end":
-            message: AIMessage = item['data']['output']
-            yield to_sse_format(event=item['event'],
-                                data=message.json(include={'tool_calls'}) if message.tool_calls else None)
-        elif item['event'] == "on_tool_end":
-            message: ToolMessage = item['data']['output']
-            yield to_sse_format(event=item['event'],
-                                data=message.json(include={'content', 'artifact', 'tool_call_id', 'name'}))
-
+async def lc_to_api_stream_events(astream_events:AsyncIterator[StreamEvent]) -> AsyncIterator[bytes]:
+    """convert langgraph asteam events to SSE style stream events.
+    For AI message chunks with tool calls, we only stream the content, 
+    tool calls will only be streamed as a whole after the full message is generated.
+    """
+    try:
+        async for item in astream_events:
+            if item['event'] == "on_chat_model_stream":
+                message: AIMessageChunk = item['data']["chunk"]
+                if message.content:
+                    data = lc_to_api_message(message, include={'content','id'})
+                    data.update({'type':'ai'})
+                    yield sse_event(data=data)
+            elif item['event'] == "on_chat_model_end":
+                message: AIMessage = item['data']['output']
+                yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE | {'content'}))
+            elif item['event'] == "on_tool_end":
+                message: ToolMessage = item['data']['output']
+                yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE))
+    except EmptyInputError as e:
+        yield sse_event(event='error', data={"error":"input must not be null."})
+    except Exception as e:
+        yield sse_event(event='error', data={"error":f"{type(e).__name__}:{str(e)}"})
+# fns
 
 # api
 prefix = "/agent"
 app = FastAPI(root_path=prefix)
-router = APIRouter(prefix=prefix)
+router = APIRouter()
 
-exclude_message_fields = {'additional_kwargs','response_metadata','example','invalid_tool_calls','usage_metadata','tool_call_chunks'}
 
-@router.post("/chat/stream")
-async def chat_stream(request: Request, graph_input: Dict = Depends(get_input), graph_config: Dict = Depends(get_config)):
-    generator = graph.astream_events(graph_input, graph_config, version='v2')
-    return StreamingResponse(to_streaming_gen(generator), media_type="text/event-stream")
+@router.post("/sessions/{session_id}/chat/stream")
+async def chat_stream(
+    request: Request, 
+    input=Depends(get_graph_input),
+    config=Depends(get_graph_config),
+    ):
+    verify_input_for_state(input, config)
+    astream_events = graph.astream_events(input, config, version='v2')
+    return StreamingResponse(lc_to_api_stream_events(astream_events), media_type="text/event-stream")
 
-@router.post("/chat/invoke")
-async def chat_invoke(request: Request, graph_input: Dict = Depends(get_input), graph_config: Dict = Depends(get_config)):
-    old_ids = set(msg.id for msg in graph_input['messages'])
-    state = graph.invoke(graph_input, graph_config)
-    new_messages = []
-    is_new_message = False
-    for message in state['messages']:
-        if message.id in old_ids:
-            is_new_message = True
-            continue
-        if is_new_message:
-            new_messages.append(message.dict(exclude=exclude_message_fields))
-    return {"messages":new_messages}
-
-@router.get("/chat/history")
-def get_chat_history(session_id: UUID = Query(...)):
-    # TODO: validate bearer token that the user has permission to this session history
-    state = graph.get_state(config=RunnableConfig(configurable={"thread_id":session_id}))
-    messages = [ message.dict(exclude=exclude_message_fields) for message in state.values.get('messages',[])]
+@router.post("/sessions/{session_id}/chat/invoke")
+async def chat_invoke(
+    request: Request, 
+    input=Depends(get_graph_input),
+    config=Depends(get_graph_config),
+    ):
+    verify_input_for_state(input, config)
+    try:
+        state = graph.invoke(input, config)
+        messages = [lc_to_api_message(message) for message in state.get('messages',[])]
+        return JSONResponse({"messages":messages})
+    except EmptyInputError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error":"input must not be null."})
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"error":f"{type(e).__name__}:{str(e)}"})
+    
+@router.get("/sessions/{session_id}/chat/history")
+def get_chat_history(
+    config=Depends(get_graph_config),
+):
+    snapshot = graph.get_state(config=config)
+    messages = [lc_to_api_message(message) for message in snapshot.values.get('messages',[])]
     return {"messages": messages}
 
+@router.post("/sessions/{session_id}/chat/tool-deny")
+async def chat_tool_deny(
+    request: Request, 
+    input:ToolDenyInput=Body(...),
+    config=Depends(get_graph_config),
+    ):
+    values = {"messages": [api_to_lc_message(msg) for msg in input.messages]}
+    graph.update_state(config, values, as_node="human")
+    return values
 
 
+
+@router.post("/sessions")
+async def create_session(
+    user_id:str=Depends(get_user_id),
+):
+    session = Session(session_id=uuid4())
+    # TODO: add to db
+    return session
+
+@router.get("/sessions")
+async def get_sessions(
+    user_id:str=Depends(get_user_id),
+) -> List[Session]:
+    ...
+
+@router.post("/sessions/{session_id}/archive")
+async def archive_session(
+    session_id: UUID=session_id_param,
+    user_id:str=Depends(get_user_id),
+):
+    return {"message":"Session archived"}
+
+# TODO: think about cancel button and history rollback
 
 
 app.include_router(router)

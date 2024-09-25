@@ -14,7 +14,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel, AfterValidator, Field, model_validator, SkipValidation
 from typing_extensions import TypedDict
 from chatbot.mocks import MockChat, mock_tool
-from chatbot.architecture.base import return_direct_condition
+from chatbot.architecture.base import return_direct_condition, PartialToolNode
 from langchain_core.language_models.chat_models import BaseChatModel
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ def multi_agent_builder(
             if tool and tool.name not in added_tool_names:
                 added_tool_names.add(tool.name)
                 all_tools.append(tool)
-    tools_node = ToolNode(all_tools)
+    tools_node = PartialToolNode(all_tools)
 
     # nodes
     switch_agent_tools = {agent.enter_tool.name:agent.name for agent in agents if agent.enter_tool}
@@ -137,7 +137,9 @@ def multi_agent_builder(
         builder.add_node(agent.name, agent.to_node())
         builder.add_edge(agent.name, update_agents_node.name)
     builder.add_node(update_agents_node.name, update_agents_node)
-    builder.add_conditional_edges(update_agents_node.name, tools_condition, {END:end, "tools":tools_node.name})
+    builder.add_conditional_edges(update_agents_node.name, tools_condition, {END:end, "tools":"human"})
+    builder.add_node("human", lambda x: {"messages":[]}) # placeholder node in case human denies tool call
+    builder.add_edge("human", tools_node.name)
     builder.add_node(tools_node.name, tools_node)
     builder.add_edge(tools_node.name, select_agent_node.name)
     return builder

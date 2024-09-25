@@ -177,7 +177,7 @@ for agent in agents:
             all_tools.append(t)
 
 checkpointer = MemorySaver()
-graph = multi_agent_builder(agents).compile(checkpointer=checkpointer)
+graph = multi_agent_builder(agents).compile(checkpointer=checkpointer, interrupt_before=['human'])
 graph.get_graph(
     # xray=True,
     ).draw_mermaid_png(output_file_path=f'graphs/{os.path.splitext(os.path.basename(__file__))[0]}.png')

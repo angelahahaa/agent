@@ -146,6 +146,7 @@ def _is_human_approve(message):
     return message.lower().strip() in ['ok','y','1','approve']
 
 def _to_deny_tool_message(snapshot, message) -> ToolMessage:
+
     tool_call_id = snapshot.values['messages'][-1].tool_calls[0]["id"]
     return ToolMessage(
                     tool_call_id=tool_call_id,
