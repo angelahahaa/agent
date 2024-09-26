@@ -3,7 +3,7 @@ import dotenv
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import (Annotated, AsyncIterator, Literal)
+from typing import Annotated, AsyncIterator, Literal
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -16,27 +16,26 @@ from uuid import UUID, uuid4
 
 import jwt
 from annotated_types import Len
-from fastapi import (APIRouter, Body, Depends, FastAPI, HTTPException,
-                     Path, Security, status)
+from fastapi import (APIRouter, Body, Depends, FastAPI, File, HTTPException, Path, Security, UploadFile, status)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from langchain_core.messages import (AIMessage, AIMessageChunk, BaseMessage,
-                                     HumanMessage, SystemMessage,
-                                     ToolMessage)
-from langchain_core.runnables import (RunnableConfig)
+from langchain_core.messages import (AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage)
+from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.schema import StreamEvent
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver, AsyncConnectionPool
 from langgraph.errors import EmptyInputError
-from pydantic import (BaseModel, Field)
+from pydantic import AnyHttpUrl, AnyUrl, BaseModel, Field
 
 from chatbot import config
 from chatbot.agents.all_multiagent import graph
-from chatbot.database.session_db import SessionManager, SessionInfo
+from chatbot.database.session_db import SessionInfo, SessionManager
 
 MSG_EXCLUDE = {
     'additional_kwargs', 'response_metadata', 'example', 'invalid_tool_calls', 'usage_metadata', 'tool_call_chunks'
 }
 
 # JSON schemas
+
 
 class ToolDenyMessage(BaseModel):
     type: Literal['tool_deny'] = Field('tool_deny')
@@ -52,6 +51,7 @@ class ChatMessage(BaseModel):
     type: Literal['human', 'system', 'tool']
     content: str | List[str | Dict] = Field(..., examples=['hi'])
 
+
 class ChatInput(BaseModel):
     messages: Annotated[List[ChatMessage], Len(min_length=1)]
 
@@ -64,7 +64,7 @@ class ChatConfig(BaseModel):
     configurable: Configurable = Field(default_factory=Configurable)
 
 
-SessionId = Annotated[UUID, Path(..., example=uuid4())]
+SessionId = Annotated[UUID, Path(..., examples=[uuid4()])]
 bearer_scheme = HTTPBearer()
 
 # convert between JSON and python objects
@@ -100,10 +100,7 @@ DecodedJwt = Annotated[Dict, Depends(get_decoded_jwt)]
 def get_username(decoded_jwt: DecodedJwt) -> str:
     username = decoded_jwt.get("preferred_username")
     if not username:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="preferred_username not found in jwt"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="preferred_username not found in jwt")
     return username
 
 
@@ -117,24 +114,24 @@ def get_graph_config(
 ) -> RunnableConfig:
     graph_config = config.model_dump(by_alias=True)
     graph_config['configurable']['username'] = username
-    graph_config['configurable']['thread_id'] = session_id
+    graph_config['configurable']['thread_id'] = str(session_id)
     return RunnableConfig(**graph_config)
 
 
-GraphConfig = Annotated[RunnableConfig, get_graph_config]
+GraphConfig = Annotated[RunnableConfig, Depends(get_graph_config)]
 
 
 def get_graph_input(input: ChatInput | None = Body(None),) -> Dict | None:
     return None if input is None else {"messages": [api_to_lc_message(msg) for msg in input.messages]}
 
 
-GraphInput = Annotated[Dict | None, get_graph_input]
+GraphInput = Annotated[Dict | None, Depends(get_graph_input)]
+
 
 # fns
-
-
-def verify_input_for_state(input: Dict | None, config: RunnableConfig):
-    next_is_tools = "tools" in graph.get_state(config=config).next
+async def verify_input_for_state(input: Dict | None, config: RunnableConfig):
+    snapshot = await graph.aget_state(config=config)
+    next_is_tools = "tools" in snapshot.next
     if next_is_tools and input is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"input must be null.")
     if not next_is_tools and input is None:
@@ -182,17 +179,31 @@ async def lc_to_api_stream_events(astream_events: AsyncIterator[StreamEvent]) ->
 
 # api
 session_manager = SessionManager()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await session_manager.create_pool(
-        config.DB_USER, 
-        config.DB_PASSWORD, 
-        config.DB_DATABASE, 
-        config.DB_HOST)
+    await session_manager.create_pool(config.DB_USER, config.DB_PASSWORD, config.DB_DATABASE, config.DB_HOST)
     await session_manager.create_table_if_not_exists()
-    yield
+    conn_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}/{config.DB_DATABASE}?sslmode=disable"
+    async with AsyncConnectionPool(
+            # Example configuration
+            conninfo=conn_string,
+            max_size=20,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+            },
+    ) as pool:
+        checkpointer = AsyncPostgresSaver(pool)
+        await checkpointer.setup()
+        graph.checkpointer = checkpointer
+        # app.state.agent = graph
+        yield
+
     # Clean up the ML models and release the resources
     await session_manager.pool.close()
+
 
 prefix = "/agent"
 app = FastAPI(root_path=prefix)
@@ -204,7 +215,7 @@ async def chat_stream(
     input: GraphInput,
     config: GraphConfig,
 ):
-    verify_input_for_state(input, config)
+    await verify_input_for_state(input, config)
     astream_events = graph.astream_events(input, config, version='v2')
     return StreamingResponse(lc_to_api_stream_events(astream_events), media_type="text/event-stream")
 
@@ -214,9 +225,9 @@ async def chat_invoke(
     input: GraphInput,
     config: GraphConfig,
 ):
-    verify_input_for_state(input, config)
+    await verify_input_for_state(input, config)
     try:
-        state = graph.invoke(input, config)
+        state = await graph.ainvoke(input, config)
         messages = [lc_to_api_message(message) for message in state.get('messages', [])]
         return JSONResponse({"messages": messages})
     except EmptyInputError as e:
@@ -227,8 +238,8 @@ async def chat_invoke(
 
 
 @router.get("/sessions/{session_id}/chat/history")
-def get_chat_history(config: GraphConfig):
-    snapshot = graph.get_state(config=config)
+def get_chat_history(session_id:SessionId):
+    snapshot = graph.get_state(config=RunnableConfig(configurable={'thread_id':str(session_id)}))
     messages = [lc_to_api_message(message) for message in snapshot.values.get('messages', [])]
     return {"messages": messages}
 
@@ -258,14 +269,37 @@ async def get_sessions(username: Username) -> List[SessionInfo]:
 @router.delete("/sessions/{session_id}")
 async def archive_session(session_id: SessionId):
     await session_manager.archive_session(session_id)
-    return {
-        "message": "Session archived successfully."
-    }
+    return {"message": "Session archived successfully."}
+
+
+class Web(BaseModel):
+    urls: List[AnyHttpUrl]
+
+
+@router.post("/sessions/{session_id}/data")
+async def add_document_to_session(
+        session_id: SessionId,
+        web: Web | None = Body(None),
+        file: UploadFile | None = File(None),
+):
+    if web is None and file is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Nothing to upload")
+
+    return {'message': 'Data received.'}
+
+
+@app.get("/sessions/{session_id}/data/{data_id}/status")
+def check_document_status(session_id: str, document_id: str):
+    ...
 
 
 # TODO: think about cancel button and history rollback
 
 app.include_router(router)
 if __name__ == "__main__":
+    import sys
+    import asyncio
     import uvicorn
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(app, host="0.0.0.0", port=1234)

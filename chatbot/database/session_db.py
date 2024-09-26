@@ -96,17 +96,17 @@ async def main():
     await session_manager.create_table_if_not_exists()
 
     username = 'example_user'
-    session_id = await session_manager.create_session(username)
-    print(f"Session created with ID: {session_id}")
+    session_info = await session_manager.create_session(username)
+    print(f"Session created with ID: {session_info}")
 
     print(f"Sessions: {await session_manager.get_sessions(username)}")
 
-    await session_manager.update_session(session_id)
+    await session_manager.update_session(session_info.session_id)
     print("Session updated with new timestamp.")
 
     print(f"Sessions: {await session_manager.get_sessions(username)}")
 
-    await session_manager.archive_session(session_id)
+    await session_manager.archive_session(session_info.session_id)
     print("Session archived.")
 
     print(f"Sessions: {await session_manager.get_sessions(username)}")

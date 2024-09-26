@@ -177,7 +177,8 @@ for agent in agents:
             all_tools.append(t)
 
 checkpointer = MemorySaver()
-graph = multi_agent_builder(agents).compile(checkpointer=checkpointer, interrupt_before=['human'])
+builder = multi_agent_builder(agents)
+graph = builder.compile(checkpointer=checkpointer, interrupt_before=['human'])
 if __name__ == '__maim__':
     graph.get_graph(
         # xray=True,
