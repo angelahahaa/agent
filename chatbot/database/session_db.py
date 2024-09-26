@@ -1,66 +1,115 @@
-import os
-from urllib.parse import urlparse
+import asyncio
+import uuid
+from datetime import datetime
+from typing import List, TypedDict
 
-from sqlalchemy import (Boolean, Column, DateTime, ForeignKey, Integer, String,
-                        create_engine)
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy.sql import func
+import asyncpg
+from pydantic import BaseModel
 
-DATABASE_URL = "sqlite:///databases/session.db"
+class SessionInfo(BaseModel):
+    session_id: uuid.UUID
+    last_modified: datetime
 
-# Define the database connection
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-Session = sessionmaker(bind=engine)
-Base = declarative_base()
+class SessionManager:
+    def __init__(self):
+        self._pool: asyncpg.pool.Pool | None = None
+    
+    @property
+    def pool(self):
+        if self._pool is None:
+            raise RuntimeError("must create_pool before other operations")
+        return self._pool
 
-# Define table
-class UserSession(Base):
-    __tablename__ = 'user_session'
-    session_id = Column(String, primary_key=True)
-    username = Column(String, nullable=False)
-    archived = Column(Boolean, default=False, nullable=False)
-    last_modified = Column(DateTime, default=func.now(), nullable=False)
-
-    def __repr__(self):
-        return f"<UserSession(session_id='{self.session_id}', username='{self.username}', is_active={self.is_active}, last_modified={self.last_modified})>"
-
-
-def initialise_database():
-    Base.metadata.create_all(engine)
+    async def create_pool(self, user: str, password: str, database: str, host: str) -> None:
+        self._pool = await asyncpg.create_pool(
+            user=user,
+            password=password,
+            database=database,
+            host=host
+        )
 
 
-def add(username, session_id) -> None:
-    with Session() as session:
-        new_session = UserSession(username=username, session_id=session_id)
-        session.add(new_session)
-        session.commit()
+    async def create_table_if_not_exists(self) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    session_id UUID PRIMARY KEY,
+                    username VARCHAR(255) NOT NULL,
+                    last_modified TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    archived BOOLEAN DEFAULT FALSE
+                )
+            ''')
 
-def archive(session_id) -> None:
-    with Session() as session:
-        session.query(UserSession)\
-            .filter(UserSession.session_id == session_id)\
-            .update({"archived": True})
-        session.commit()
+    async def session_exists(self, session_id: uuid.UUID) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchval(
+                '''
+                SELECT EXISTS(
+                    SELECT 1 FROM user_sessions WHERE session_id = $1
+                )
+                ''', str(session_id))
+            return bool(result)
 
-def get_sessions(username, include_archived=False):
-    with Session() as session:
-        filters = [UserSession.username == username]
-        if not include_archived:
-            filters += [UserSession.archived == False]
-        sessions = session.query(UserSession.session_id)\
-            .filter(*filters)\
-            .order_by(UserSession.last_modified.desc())\
-            .all()
-        return [s[0] for s in sessions]
+    async def create_session(self, username: str) -> SessionInfo:
+        session_id = uuid.uuid4()
+        async with self.pool.acquire() as conn:
+            last_modified = datetime.now()
+            await conn.execute(
+                '''
+                INSERT INTO user_sessions(session_id, username, last_modified, archived)
+                VALUES($1, $2, $3, $4)
+                ''', str(session_id), username, last_modified, False)
+        return SessionInfo(session_id=session_id, last_modified=last_modified)
 
-def update_last_modified(session_id):
-    with Session() as session:
-        # Fetch the session object
-        user_session = session.query(UserSession).filter_by(session_id=session_id).one()
-        if user_session:
-            user_session.last_modified = func.now()
-            session.commit()
+    async def update_session(self, session_id: uuid.UUID) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                '''
+                UPDATE user_sessions
+                SET last_modified = $2
+                WHERE session_id = $1
+                ''', str(session_id), datetime.now())
+
+    async def archive_session(self, session_id: uuid.UUID) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                '''
+                UPDATE user_sessions
+                SET archived = TRUE
+                WHERE session_id = $1
+                ''', str(session_id))
+
+    async def get_sessions(self, username: str) -> List[SessionInfo]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                '''
+                SELECT session_id, last_modified
+                FROM user_sessions
+                WHERE username = $1 AND archived = FALSE
+                ORDER BY last_modified DESC
+                ''', username)
+            return [SessionInfo(session_id=row['session_id'], last_modified=row['last_modified']) for row in rows]
+
+async def main():
+    session_manager = SessionManager()
+    await session_manager.create_pool('postgres', 'password', 'postgres', 'localhost')
+    await session_manager.create_table_if_not_exists()
+
+    username = 'example_user'
+    session_id = await session_manager.create_session(username)
+    print(f"Session created with ID: {session_id}")
+
+    print(f"Sessions: {await session_manager.get_sessions(username)}")
+
+    await session_manager.update_session(session_id)
+    print("Session updated with new timestamp.")
+
+    print(f"Sessions: {await session_manager.get_sessions(username)}")
+
+    await session_manager.archive_session(session_id)
+    print("Session archived.")
+
+    print(f"Sessions: {await session_manager.get_sessions(username)}")
 
 if __name__ == '__main__':
-    print(get_sessions("angela"))
+    asyncio.run(main())
