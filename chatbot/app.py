@@ -260,18 +260,18 @@ async def lifespan(app: FastAPI):
         checkpointer = AsyncPostgresSaver(pool) # type: ignore
         await checkpointer.setup()
         # agents with no tools
-        agents[f'base-gpt4o-mini'] = Agent(
-            graph=no_tools_agent_builder(ChatOpenAI(model='gpt4o-mini')).compile(checkpointer=checkpointer),
+        agents[f'gpt-4o-mini'] = Agent(
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o-mini')).compile(checkpointer=checkpointer),
             tools = [],
             )
-        agents[f'base-gpt4o'] = Agent(
-            graph=no_tools_agent_builder(ChatOpenAI(model='gpt4o')).compile(checkpointer=checkpointer),
+        agents[f'gpt-4o'] = Agent(
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o')).compile(checkpointer=checkpointer),
             tools = [],
             )
         # preset1
         assistants = [primary_agent, jira_agent, IT_agent]
         builder = multi_agent_builder(assistants)
-        agents['preset1'] = Agent(
+        agents['agent-1'] = Agent(
             graph=builder.compile(checkpointer=checkpointer, interrupt_before=['human']),
             tools = get_all_tools(assistants),
             )
@@ -287,7 +287,9 @@ prefix = "/agent"
 app = FastAPI(root_path=prefix)
 router = APIRouter(lifespan=lifespan)
 
-
+@router.get("/agents")
+def get_available_agents(request:Request):
+    return list(request.app.agents.keys())
 
 @router.get("/sessions/{session_id}/tools")
 async def get_available_tools(
