@@ -1,3 +1,6 @@
+""" Prebuilt agents that can be used with multi_agent_builder
+"""
+
 from typing import List, Set
 
 import dotenv
@@ -22,7 +25,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig, RunnablePassthrough
 from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import InjectedState, ToolNode, tools_condition
@@ -30,7 +32,7 @@ from typing_extensions import TypedDict
 
 from chatbot import tools
 from chatbot.architecture.clarify import clarify_agent_builder
-from chatbot.architecture.multiagent import Agent, multi_agent_builder, MultiAgentState
+from chatbot.architecture.multiagent import Agent, MultiAgentState
 from chatbot.mocks import MockChat, mock_tool
 
 
@@ -162,24 +164,31 @@ primary_agent = Agent(
     enter_tool=None, # cannot enter, will be entered by default when no more pending tasks
     exit_tool=None, # cannot exit base agent
 )
-agents = [
+
+def get_all_tools(agents:List[Agent]) -> List[BaseTool]:
+    added = set()
+    all_tools:List[BaseTool] = []
+    for agent in agents:
+        for t in agent.tools:
+            if t.name not in added:
+                added.add(t.name)
+                all_tools.append(t)
+    return all_tools
+
+if __name__ == '__maim__':
+    from chatbot.architecture.multiagent import multi_agent_builder, MultiAgentState
+    from langgraph.checkpoint.memory import MemorySaver
+    agents = [
     primary_agent, 
     IT_agent, 
     jira_agent,
     ]
 
-added = set()
-all_tools = []
-for agent in agents:
-    for t in agent.tools:
-        if t.name not in added:
-            added.add(t.name)
-            all_tools.append(t)
 
-checkpointer = MemorySaver()
-builder = multi_agent_builder(agents)
-graph = builder.compile(checkpointer=checkpointer, interrupt_before=['human'])
-if __name__ == '__maim__':
+
+    builder = multi_agent_builder(agents)
+    checkpointer = MemorySaver()
+    graph = builder.compile(checkpointer=checkpointer, interrupt_before=['human'])
     graph.get_graph(
         # xray=True,
         ).draw_mermaid_png(output_file_path=f'graphs/{os.path.splitext(os.path.basename(__file__))[0]}.png')

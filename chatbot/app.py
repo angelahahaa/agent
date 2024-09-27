@@ -1,12 +1,17 @@
+from collections import defaultdict
+from datetime import datetime
+
 import dotenv
+from langchain_openai import ChatOpenAI
 
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, AsyncIterator, Literal
+from typing import Annotated, AsyncIterator, Literal, TypedDict
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, START, StateGraph
 
 logger = logging.getLogger()
 import json
@@ -16,20 +21,41 @@ from uuid import UUID, uuid4
 
 import jwt
 from annotated_types import Len
-from fastapi import (APIRouter, Body, Depends, FastAPI, File, HTTPException, Path, Security, UploadFile, status)
+from fastapi import (APIRouter, Body, Depends, FastAPI, File, HTTPException,
+                     Path, Request, Security, UploadFile, status)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from langchain_core.messages import (AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage)
+from langchain_core.messages import (AIMessage, AIMessageChunk, BaseMessage,
+                                     HumanMessage, SystemMessage, ToolMessage)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.schema import StreamEvent
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver, AsyncConnectionPool
+from langchain_core.tools import BaseTool, tool
+from langgraph.checkpoint.postgres.aio import (AsyncConnectionPool,
+                                               AsyncPostgresSaver)
 from langgraph.errors import EmptyInputError
+from langgraph.graph.message import AnyMessage, add_messages
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.prebuilt import create_react_agent
 from pydantic import AnyHttpUrl, AnyUrl, BaseModel, Field
 
 from chatbot import config
-from chatbot.agents.all_multiagent import graph
+from chatbot.agents.all_multiagent import (IT_agent, get_all_tools, jira_agent,
+                                           primary_agent)
+from chatbot.architecture.multiagent import multi_agent_builder
 from chatbot.database.session_db import SessionInfo, SessionManager
-
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import (Runnable, RunnableConfig, RunnableLambda,
+                                      RunnablePassthrough)
+from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import AnyMessage, add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import BaseModel, AfterValidator, Field, model_validator, SkipValidation
+from typing_extensions import TypedDict
+from chatbot.mocks import MockChat, mock_tool
+from chatbot.architecture.base import return_direct_condition, PartialToolNode
+from langchain_core.language_models.chat_models import BaseChatModel
 MSG_EXCLUDE = {
     'additional_kwargs', 'response_metadata', 'example', 'invalid_tool_calls', 'usage_metadata', 'tool_call_chunks'
 }
@@ -129,8 +155,8 @@ GraphInput = Annotated[Dict | None, Depends(get_graph_input)]
 
 
 # fns
-async def verify_input_for_state(input: Dict | None, config: RunnableConfig):
-    snapshot = await graph.aget_state(config=config)
+async def verify_input_for_state(agent:CompiledStateGraph, input: Dict | None, config: RunnableConfig):
+    snapshot = await agent.aget_state(config=config)
     next_is_tools = "tools" in snapshot.next
     if next_is_tools and input is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"input must be null.")
@@ -172,22 +198,58 @@ async def lc_to_api_stream_events(astream_events: AsyncIterator[StreamEvent]) ->
                 message: ToolMessage = item['data']['output']  # type: ignore
                 yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE))
     except EmptyInputError as e:
+        logger.error(e)
         yield sse_event(event='error', data={"error": "input must not be null."})
     except Exception as e:
+        logger.error(e)
         yield sse_event(event='error', data={"error": f"{type(e).__name__}:{str(e)}"})
 
 
 # api
-session_manager = SessionManager()
+class Agent(TypedDict):
+    graph: CompiledStateGraph
+    tools: List[BaseTool]
 
+async def get_agent(request:Request, session_id:SessionId):
+    session_manager:SessionManager = request.app.state.session_manager
+    session_info = await session_manager.get_session(session_id)
+    if not session_info:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id")
+    agents:Dict[str, Agent] = request.app.state.agents
+    return agents[session_info.agent_name]
+
+def no_tools_agent_builder(llm:BaseChatModel):
+    """ agent with no tools, only default system prompt"""
+    State=TypedDict('State', {'messages':Annotated[AnyMessage, add_messages]})
+    builder = StateGraph(State)
+    agent = (
+        RunnablePassthrough.assign(**{"time":lambda x:datetime.now()})
+        | ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are a helpful assistant for Virtuos Games Company. "
+                "\nCurrent time: {time}."
+            ),
+            ("placeholder", "{messages}"),
+            ])
+        | llm
+        | RunnableLambda(lambda x:{'messages':[x]})
+        )
+    builder.add_edge(START, 'agent')
+    builder.add_node('agent', agent)
+    builder.add_edge('agent', END)
+    return builder
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await session_manager.create_pool(config.DB_USER, config.DB_PASSWORD, config.DB_DATABASE, config.DB_HOST)
-    await session_manager.create_table_if_not_exists()
     conn_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}/{config.DB_DATABASE}?sslmode=disable"
+    # initialise session manager
+    session_manager = SessionManager(conn_string)
+    await session_manager.setup()
+    app.state.session_manager = session_manager
+    # initialise agents
+    agents:Dict[str, Agent] = dict()
     async with AsyncConnectionPool(
-            # Example configuration
             conninfo=conn_string,
             max_size=20,
             kwargs={
@@ -195,13 +257,29 @@ async def lifespan(app: FastAPI):
                 "prepare_threshold": 0,
             },
     ) as pool:
-        checkpointer = AsyncPostgresSaver(pool)
+        checkpointer = AsyncPostgresSaver(pool) # type: ignore
         await checkpointer.setup()
-        graph.checkpointer = checkpointer
-        # app.state.agent = graph
+        # agents with no tools
+        agents[f'base-gpt4o-mini'] = Agent(
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt4o-mini')).compile(checkpointer=checkpointer),
+            tools = [],
+            )
+        agents[f'base-gpt4o'] = Agent(
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt4o')).compile(checkpointer=checkpointer),
+            tools = [],
+            )
+        # preset1
+        assistants = [primary_agent, jira_agent, IT_agent]
+        builder = multi_agent_builder(assistants)
+        agents['preset1'] = Agent(
+            graph=builder.compile(checkpointer=checkpointer, interrupt_before=['human']),
+            tools = get_all_tools(assistants),
+            )
+        # add agents to app state
+        app.state.agents = agents
         yield
 
-    # Clean up the ML models and release the resources
+    # Clean up
     await session_manager.pool.close()
 
 
@@ -210,22 +288,35 @@ app = FastAPI(root_path=prefix)
 router = APIRouter(lifespan=lifespan)
 
 
-@router.post("/sessions/{session_id}/chat/stream")
+
+@router.get("/sessions/{session_id}/tools")
+async def get_available_tools(
+    agent: Annotated[Agent, Depends(get_agent)],
+):
+    return [t.name for t in agent['tools']]
+    
+
+
+@router.post("/sessions/{session_id}/chat/stream")  
 async def chat_stream(
+    agent: Annotated[Agent, Depends(get_agent)],
     input: GraphInput,
     config: GraphConfig,
 ):
-    await verify_input_for_state(input, config)
+    graph = agent['graph']
+    await verify_input_for_state(graph, input, config)
     astream_events = graph.astream_events(input, config, version='v2')
     return StreamingResponse(lc_to_api_stream_events(astream_events), media_type="text/event-stream")
 
 
 @router.post("/sessions/{session_id}/chat/invoke")
 async def chat_invoke(
+    agent: Annotated[Agent, Depends(get_agent)],
     input: GraphInput,
     config: GraphConfig,
 ):
-    await verify_input_for_state(input, config)
+    graph = agent['graph']
+    await verify_input_for_state(graph, input, config)
     try:
         state = await graph.ainvoke(input, config)
         messages = [lc_to_api_message(message) for message in state.get('messages', [])]
@@ -238,36 +329,47 @@ async def chat_invoke(
 
 
 @router.get("/sessions/{session_id}/chat/history")
-def get_chat_history(session_id:SessionId):
-    snapshot = graph.get_state(config=RunnableConfig(configurable={'thread_id':str(session_id)}))
+def get_chat_history(
+    agent: Annotated[Agent, Depends(get_agent)],
+    session_id:SessionId,
+    ):
+    snapshot = agent['graph'].get_state(config=RunnableConfig(configurable={'thread_id':str(session_id)}))
     messages = [lc_to_api_message(message) for message in snapshot.values.get('messages', [])]
     return {"messages": messages}
 
 
 @router.post("/sessions/{session_id}/chat/tool-deny")
 async def chat_tool_deny(
+    agent: Annotated[Agent, Depends(get_agent)],
     input: Annotated[ToolDenyInput, Body(...)],
     config: GraphConfig,
 ):
+    graph = agent['graph']
     values = {"messages": [api_to_lc_message(msg) for msg in input.messages]}
     graph.update_state(config, values, as_node="human")
     return values
 
 
 @router.post("/sessions")
-async def create_session(username: Username) -> SessionInfo:
-    session_info = await session_manager.create_session(username)
+async def create_session(request:Request, username: Username, agent_name:str) -> SessionInfo:
+    session_manager:SessionManager = app.state.session_manager
+    agents:Dict[str, Agent] = request.app.state.agents
+    if not agent_name in agents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid agent_name, must be one of: {list(agents.keys())}")
+    session_info = await session_manager.create_session(username, agent_name)
     return session_info
 
 
 @router.get("/sessions")
 async def get_sessions(username: Username) -> List[SessionInfo]:
+    session_manager:SessionManager = app.state.session_manager
     session_infos = await session_manager.get_sessions(username)
     return session_infos
 
 
 @router.delete("/sessions/{session_id}")
 async def archive_session(session_id: SessionId):
+    session_manager:SessionManager = app.state.session_manager
     await session_manager.archive_session(session_id)
     return {"message": "Session archived successfully."}
 
@@ -277,7 +379,7 @@ class Web(BaseModel):
 
 
 @router.post("/sessions/{session_id}/data")
-async def add_document_to_session(
+async def add_data_to_session(
         session_id: SessionId,
         web: Web | None = Body(None),
         file: UploadFile | None = File(None),
@@ -289,7 +391,7 @@ async def add_document_to_session(
 
 
 @app.get("/sessions/{session_id}/data/{data_id}/status")
-def check_document_status(session_id: str, document_id: str):
+def check_add_data_status(session_id: str, document_id: str):
     ...
 
 
@@ -297,8 +399,9 @@ def check_document_status(session_id: str, document_id: str):
 
 app.include_router(router)
 if __name__ == "__main__":
-    import sys
     import asyncio
+    import sys
+
     import uvicorn
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
