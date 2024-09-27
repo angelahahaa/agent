@@ -1,6 +1,8 @@
+import os
 from collections import defaultdict
 from datetime import datetime
 
+import aiofiles
 import dotenv
 from langchain_openai import ChatOpenAI
 
@@ -25,37 +27,33 @@ from fastapi import (APIRouter, Body, Depends, FastAPI, File, HTTPException,
                      Path, Request, Security, UploadFile, status)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (AIMessage, AIMessageChunk, BaseMessage,
                                      HumanMessage, SystemMessage, ToolMessage)
-from langchain_core.runnables import RunnableConfig
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import (Runnable, RunnableConfig, RunnableLambda,
+                                      RunnablePassthrough)
 from langchain_core.runnables.schema import StreamEvent
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 from langgraph.checkpoint.postgres.aio import (AsyncConnectionPool,
                                                AsyncPostgresSaver)
 from langgraph.errors import EmptyInputError
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.prebuilt import create_react_agent
-from pydantic import AnyHttpUrl, AnyUrl, BaseModel, Field
+from langgraph.prebuilt import ToolNode, create_react_agent, tools_condition
+from pydantic import (AfterValidator, AnyHttpUrl, AnyUrl, BaseModel, Field,
+                      SkipValidation, model_validator)
+from typing_extensions import TypedDict
 
 from chatbot import config
 from chatbot.agents.all_multiagent import (IT_agent, get_all_tools, jira_agent,
                                            primary_agent)
+from chatbot.architecture.base import PartialToolNode, return_direct_condition
 from chatbot.architecture.multiagent import multi_agent_builder
 from chatbot.database.session_db import SessionInfo, SessionManager
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import (Runnable, RunnableConfig, RunnableLambda,
-                                      RunnablePassthrough)
-from langchain_core.tools import BaseTool, StructuredTool
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import AnyMessage, add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
-from pydantic import BaseModel, AfterValidator, Field, model_validator, SkipValidation
-from typing_extensions import TypedDict
 from chatbot.mocks import MockChat, mock_tool
-from chatbot.architecture.base import return_direct_condition, PartialToolNode
-from langchain_core.language_models.chat_models import BaseChatModel
+
 MSG_EXCLUDE = {
     'additional_kwargs', 'response_metadata', 'example', 'invalid_tool_calls', 'usage_metadata', 'tool_call_chunks'
 }
@@ -242,15 +240,15 @@ def no_tools_agent_builder(llm:BaseChatModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    conn_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}/{config.DB_DATABASE}?sslmode=disable"
+    os.makedirs(config.TEMP_DIR, exist_ok=True)
     # initialise session manager
-    session_manager = SessionManager(conn_string)
+    session_manager = SessionManager(config.CONN_STRING)
     await session_manager.setup()
     app.state.session_manager = session_manager
     # initialise agents
     agents:Dict[str, Agent] = dict()
     async with AsyncConnectionPool(
-            conninfo=conn_string,
+            conninfo=config.CONN_STRING,
             max_size=20,
             kwargs={
                 "autocommit": True,
@@ -375,27 +373,57 @@ async def archive_session(session_id: SessionId):
     await session_manager.archive_session(session_id)
     return {"message": "Session archived successfully."}
 
-
-class Web(BaseModel):
-    urls: List[AnyHttpUrl]
+from chatbot.database import data_db
 
 
-@router.post("/sessions/{session_id}/data")
-async def add_data_to_session(
-        session_id: SessionId,
-        web: Web | None = Body(None),
-        file: UploadFile | None = File(None),
+@router.post("/data")
+async def upload(
+    data_type:Literal['file','web','github'] = Body(...),
+    url: str | None = Body(None),
+    file: UploadFile | None = File(None),
 ):
-    if web is None and file is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Nothing to upload")
+    """ Uploads data to vector store
+    """
+    data_id = f"data_{uuid4()}"
+    if data_type == 'file':
+        if file is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"data_type '{data_type}' requires upload file."
+            )
+        ext = os.path.split(file.filename)[1] if file.filename else ""
+        path = os.path.join(config.TEMP_DIR, data_id + ext)
+        async with aiofiles.open(path, 'wb') as async_temp_file:
+            chunk_size = 1024 * 1024  # 1 MB, read in chunks to avoid RAM overload
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                await async_temp_file.write(chunk)
+        asyncio.create_task(data_db.put_file(data_id, path, metadata={'source':file.filename or 'unkown'}))
+    elif data_type == 'web':
+        if url is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"data_type '{data_type}' requires url."
+            )
+        asyncio.create_task(data_db.put_web(data_id, url))
 
-    return {'message': 'Data received.'}
+    else:
+        raise NotImplementedError()
+    return {'data_id': data_id}
 
 
-@app.get("/sessions/{session_id}/data/{data_id}/status")
-def check_add_data_status(session_id: str, document_id: str):
+@app.get("/data/{data_id}/status")
+def check_data_status(data_id: str):
     ...
 
+@router.post("/sessions/{session_id}/data/{data_id}")
+def add_data_to_session(session_id:SessionId, data_id:str):
+    """ Does not verify if the data_id exists or is completely uploaded. 
+    This piece of data will be ignored if data_id is invalid
+    """
+    ...
 
 # TODO: think about cancel button and history rollback
 
@@ -403,8 +431,7 @@ app.include_router(router)
 if __name__ == "__main__":
     import asyncio
     import sys
-
-    import uvicorn
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=1234)
