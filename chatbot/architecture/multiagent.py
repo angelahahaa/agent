@@ -128,6 +128,11 @@ def multi_agent_builder(
                        ), 
         name = "select_agent")
 
+    # just so type check errors dont show
+    assert select_agent_node.name 
+    assert update_agents_node.name
+    assert tools_node.name
+
     # build
     builder = builder or StateGraph(state_schema)
     builder.add_edge(start, select_agent_node.name)
@@ -148,7 +153,7 @@ def save_graph():
     import os
     agents = [Agent(
     name=name,
-    llm=MockChat(model=name),
+    llm=MockChat(name=name),
     tools=[mock_tool(f'{name}1'), mock_tool(f'{name}2')],
     ) for name in ['primary','worker1','worker2']]
 

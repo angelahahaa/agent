@@ -82,6 +82,7 @@ class ChatInput(BaseModel):
 
 class Configurable(BaseModel):
     foo: str | None = ""
+    data_ids:List[str] = Field(default_factory=list)
 
 
 class ChatConfig(BaseModel):
@@ -166,7 +167,7 @@ def lc_to_api_message(message: BaseMessage, include=None, exclude=MSG_EXCLUDE) -
     return message.dict(include=include, exclude=exclude)
 
 
-def sse_event(event: Literal['error'] | None = None, data: dict | None = None):
+def sse_event(event: str | None = None, data: dict | None = None):
     s = ''
     if event:
         s += f"event: {event}\n"
@@ -183,6 +184,8 @@ async def lc_to_api_stream_events(astream_events: AsyncIterator[StreamEvent]) ->
     """
     try:
         async for item in astream_events:
+            if item['event'] == "on_chat_model_start":
+                yield sse_event(event='message_start')
             if item['event'] == "on_chat_model_stream":
                 message: AIMessageChunk = item['data']["chunk"]  # type: ignore
                 if message.content:
@@ -191,10 +194,15 @@ async def lc_to_api_stream_events(astream_events: AsyncIterator[StreamEvent]) ->
                     yield sse_event(data=data)
             elif item['event'] == "on_chat_model_end":
                 message: AIMessage = item['data']['output']  # type: ignore
-                yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE | {'content'}))
+                data=lc_to_api_message(message, exclude= MSG_EXCLUDE | {'content'})
+                data.update({'type': 'ai'})
+                yield sse_event(data=data)
+                yield sse_event(event='message_end')
             elif item['event'] == "on_tool_end":
                 message: ToolMessage = item['data']['output']  # type: ignore
+                yield sse_event(event='message_start')
                 yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE))
+                yield sse_event(event='message_end')
     except EmptyInputError as e:
         logger.error(e)
         yield sse_event(event='error', data={"error": "input must not be null."})
