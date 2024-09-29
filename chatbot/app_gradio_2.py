@@ -187,7 +187,7 @@ class UserState:
     tool_calls: List[Dict] = field(default_factory=list)
 
 with gr.Blocks() as demo:
-    with gr.Accordion('hidden', open=False):
+    with gr.Accordion('hidden', open=False, render=False) as hidden_accordion:
         user_state = gr.State(UserState)
         refresh_tool_call_trigger = gr.Number(1)
     messages_chatbot = gr.Chatbot(type='messages')
@@ -252,31 +252,42 @@ with gr.Blocks() as demo:
         inputs=[user_state],
     )
     def render_tool_calls(user:UserState):
-        for tool_call in user.tool_calls:
-            with gr.Column(variant='panel') as tool_call_group:
-                tool_call_json = gr.JSON(tool_call)
-                decision_radio = gr.Radio(['approve','deny'], value='approve', container=False)
-                reason_text = gr.Text(container=False, placeholder='reason (optional)', visible=False)
-                decision_radio.change(lambda x: gr.update(visible=x=='deny'), inputs=[decision_radio], outputs=[reason_text])
-                submit_button = gr.Button('submit', size='sm')
-            @submit_button.click(
-                inputs=[user_state, decision_radio, reason_text, tool_call_json],
-                outputs=[user_state, refresh_tool_call_trigger, messages_chatbot, tool_call_group]
-            )
-            def submit_tool_call_decision(user:UserState, decision:Literal['approve','deny'], reason:str, tc:Dict):
+        if not user.tool_calls:
+            return
+        tool_call_components = []
+        with gr.Row() as tool_call_group:
+            for tool_call in user.tool_calls:
+                with gr.Column(variant='panel'):
+                    tool_call_json = gr.JSON(tool_call)
+                    decision_radio = gr.Radio(['approve','deny'], value='approve', container=False)
+                    reason_text = gr.Text(container=False, placeholder='reason (optional)', visible=False)
+                    decision_radio.change(lambda x: gr.update(visible=x=='deny'), inputs=[decision_radio], outputs=[reason_text])
+                    tool_call_components.append([tool_call_json, decision_radio, reason_text])
+        submit_button = gr.Button('submit', size='sm')
+        @submit_button.click(
+            inputs={c for components in tool_call_components for c in components} | {user_state},
+            outputs=[user_state, refresh_tool_call_trigger, messages_chatbot, tool_call_group, submit_button, text_text, send_button]
+        )
+        def submit_tool_call_decisions(inputs):
+            user = inputs[user_state]
+            for tool_call_json, decision_radio, reason_text in tool_call_components:
+                decision = inputs[decision_radio]
+                tc = inputs[tool_call_json]
+                reason = inputs[reason_text]
                 if decision =='deny':
                     user.messages.append(chat_deny(reason, tc['id']))
                     yield {messages_chatbot: to_chat_messages(user.messages)}
-                user.tool_calls = [t for t in user.tool_calls if t['id'] != tc['id']]
-                if len(user.tool_calls) == 0:
-                    yield {tool_call_group: gr.update(visible=False)}
-                    for d in send(user, None):
-                        yield d
-                else:
-                    yield {user_state:user}
-                    yield {refresh_tool_call_trigger:random.random()}
+            user.tool_calls = []
+            yield {
+                tool_call_group: gr.update(visible=False), 
+                submit_button:gr.update(visible=False),
+                text_text:gr.update(visible=True),
+                send_button:gr.update(visible=True),
+                }
+            for d in send(user, None):
+                yield d
 
-
+    hidden_accordion.render()
     with gr.Accordion('debug', open=False):
         gr.Button('user_state').click(lambda x:print(f"====\n{json.dumps(x.messages, indent=2)}\n{json.dumps(x.tool_calls)}\n===="), inputs=[user_state])
 
