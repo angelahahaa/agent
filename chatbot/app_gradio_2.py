@@ -1,156 +1,18 @@
-from collections import defaultdict
+from datetime import datetime
 import json
 import random
 import time
-from typing import Dict, Iterator, List, Literal, NotRequired
-from typing_extensions import TypedDict
-from uuid import uuid4
-import gradio as gr
+from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Dict, Iterator, List, Literal, NotRequired
+from uuid import uuid4
 
-from typing import Dict, List
 import gradio as gr
+import httpx
+from typing_extensions import TypedDict
 
+from chatbot.client import ChatbotAPI
 
-
-# fake gpt
-responses = [
-"""event: message_start
-
-data: {"content": "Hello", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": "!", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " How", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " can", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " I", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " assist", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " you", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": " today", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"content": "?", "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "type": "ai"}
-
-data: {"type": "ai", "name": null, "id": "run-a6a84c4a-e8f6-4187-b9bd-6dc5f0a60ae0", "tool_calls": []}
-
-event: message_end
-
-""",
-"""event: message_start
-
-data: {"type": "ai", "name": null, "id": "run-1bcef17a-dc92-4af1-ba68-8631f360bcdf", "tool_calls": [{"name": "accept_this_one", "args": {}, "id": "call_SabmtRGYklDvSDYGjAcIE9J5", "type": "tool_call"}, {"name": "deny_this_one", "args": {}, "id": "call_SabmtRGYklDvSDYGjAcIE9J4", "type": "tool_call"}]}
-
-event: message_end
-
-""",
-"""event: message_start
-
-data: {"content": "{}", "type": "tool", "name": "accept_this_one", "id": null, "tool_call_id": "call_SabmtRGYklDvSDYGjAcIE9J5", "artifact": null, "status": "success"}
-
-event: message_end
-
-event: message_start
-
-data: {"content": "It", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " looks", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " like", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " there", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " isn't", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " any", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " specific", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " user", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " information", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " available", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": ".", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " If", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " you", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " have", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " particular", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " details", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " or", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " questions", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " about", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " yourself", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " that", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " you'd", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " like", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " to", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " share", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " or", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " ask", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": ",", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " feel", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": " free", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"content": "!", "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "type": "ai"}
-
-data: {"type": "ai", "name": null, "id": "run-b258017b-58a4-464f-85dc-413d7dcc85c1", "tool_calls": []}
-
-event: message_end
-
-"""
-]
-class EventStream(TypedDict):
-    event:NotRequired[str]
-    data:NotRequired[Dict]
-def chat_stream(input:Dict | None) -> Iterator[EventStream]:
-    if input is None:
-        lines = responses[2]
-    else:
-        lines = responses[random.randint(0,1)]
-    event = EventStream()
-    for line in lines.splitlines(keepends=True):
-        line = line.rstrip('\n')
-        if not line:
-            time.sleep(0.1)
-            yield event
-            event = EventStream()
-        elif line.startswith('event: '):
-            event['event'] = line[7:]
-        elif line.startswith('data: '):
-            event['data'] = json.loads(line[6:])
-
-def chat_deny(reason:str, id:str):
-    return {
-        'name': 'deny_this_one',
-        'content': f"Tool call denied by user. {reason}",
-        'tool_call_id': id,
-        'artifact': {'reason': reason},
-        'type':'tool',
-    }
 
 def update_message(message:Dict, chunk:Dict):
     for k,v in chunk.items():
@@ -184,20 +46,55 @@ def to_chat_messages(messages:List[Dict]) -> List[gr.ChatMessage]:
 @dataclass
 class UserState:
     messages: List[Dict] = field(default_factory=list)
-    tool_calls: List[Dict] = field(default_factory=list)
+    session_id: str | None = None
+
+client = ChatbotAPI("http://localhost:1234/agent", token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwcmVmZXJyZWRfdXNlcm5hbWUiOiJhbmdlbGFAYWJjLmNvbSIsImV4cCI6MTcyNzM0MjcxNH0.JHO8i-dQLD_ooL3-7AFV3b63m6l7OttK_jzky5dV9HI")
+agent_name_choices = client.get_available_agents()
 
 with gr.Blocks() as demo:
-    with gr.Accordion('hidden', open=False, render=False) as hidden_accordion:
-        user_state = gr.State(UserState)
-        refresh_tool_call_trigger = gr.Number(1)
-    messages_chatbot = gr.Chatbot(type='messages')
-    with gr.Row():
-        text_text = gr.Text(container=False, scale=4)
-        send_button = gr.Button('send', size='sm', min_width=60)
+    # Components
+    user_state = gr.State(UserState, render=False)
+    refresh_tool_call_trigger = gr.Number(1, label='refresh_tool_call_trigger', render=False)
+    messages_chatbot = gr.Chatbot(type='messages', render=False, height="70vh", show_label=False)
+    text_text = gr.Text(container=False, render=False)
+    send_button = gr.Button('send', size='sm', min_width=60, render=False)
 
+    sessions_radio = gr.Radio([], label='sessions', container=False, render=False)
+    new_session_button = gr.Button('New Session', size='sm', min_width=60, render=False)
+    delete_session_button = gr.Button('Delete Session', size='sm', min_width=60, render=False)
+    agent_name_dropdown = gr.Dropdown(agent_name_choices, value=agent_name_choices[0], container=False, render=False)
 
-    def send(user:UserState, input:Dict|None):
-        for event_stream in chat_stream(input):
+    # Events
+    @demo.load(outputs=[sessions_radio])
+    def update_sessions():
+        sessions = client.get_sessions()
+        sessions.sort(key=lambda x: datetime.fromisoformat(x['last_modified']), reverse=True)
+        sessions = [(f"{s['agent_name']} ({s['session_id']})", s['session_id']) for s in sessions]
+        return {sessions_radio:gr.Radio(sessions, value=sessions[0][1] if sessions else None)}
+
+    @new_session_button.click(inputs=[agent_name_dropdown], outputs=[sessions_radio])
+    def new_session(agent_name:str):
+        client.create_session(agent_name)
+        return update_sessions()
+
+    @delete_session_button.click(inputs=[sessions_radio], outputs=[sessions_radio])
+    def delete_session(session_id:str):
+        client.archive_session(session_id)
+        return update_sessions()
+
+    @sessions_radio.change(inputs=[user_state, sessions_radio], outputs=[user_state, messages_chatbot, refresh_tool_call_trigger])
+    def on_session_change(user:UserState, session_id:str|None):
+        user.session_id = session_id
+        if session_id is None:
+            return {messages_chatbot:[]}
+        user.messages = client.get_chat_history(session_id)['messages']
+        yield {user_state: user}
+        yield {messages_chatbot:to_chat_messages(user.messages), refresh_tool_call_trigger:random.random()}
+
+    def send(user:UserState, input:Dict | None):
+        if not user.session_id:
+            raise gr.Error('No active session')
+        for event_stream in client.chat_stream(user.session_id, input, {}):
             event = event_stream.get('event')
             data = event_stream.get('data', {})
             if event == 'error':
@@ -213,7 +110,6 @@ with gr.Blocks() as demo:
                     user_state: user, 
                     messages_chatbot:to_chat_messages(user.messages),
                     }
-        user.tool_calls = user.messages[-1].get('tool_calls',[])
         yield {user_state:user}
         yield {refresh_tool_call_trigger:random.random()}
 
@@ -229,7 +125,7 @@ with gr.Blocks() as demo:
             }
         user.messages.append(message)
         yield  {
-            text_text:None, 
+            text_text: gr.Text(None), 
             user_state: user, 
             messages_chatbot:to_chat_messages(user.messages),
             }
@@ -244,19 +140,35 @@ with gr.Blocks() as demo:
         outputs=[text_text, send_button],
     )
     def toggle_user_text(user:UserState):
-        visible = not bool(user.tool_calls)
+        if not user.messages:
+            visible = True
+        message = user.messages[-1]
+        visible = not bool(message.get('tool_calls'))
         return gr.update(visible=visible), gr.update(visible=visible)
 
+
+
+    # UI
+    with gr.Row():
+        agent_name_dropdown.render()
+        new_session_button.render()
+        delete_session_button.render()
+    sessions_radio.render()
+    messages_chatbot.render()
+    with gr.Row():
+        text_text.scale=4
+        text_text.render()
+        send_button.render()
     @gr.render(
         triggers=[refresh_tool_call_trigger.change],
         inputs=[user_state],
     )
     def render_tool_calls(user:UserState):
-        if not user.tool_calls:
+        if not (tool_calls:=user.messages[-1].get('tool_calls')):
             return
         tool_call_components = []
         with gr.Row() as tool_call_group:
-            for tool_call in user.tool_calls:
+            for tool_call in tool_calls:
                 with gr.Column(variant='panel'):
                     tool_call_json = gr.JSON(tool_call)
                     decision_radio = gr.Radio(['approve','deny'], value='approve', container=False)
@@ -269,15 +181,19 @@ with gr.Blocks() as demo:
             outputs=[user_state, refresh_tool_call_trigger, messages_chatbot, tool_call_group, submit_button, text_text, send_button]
         )
         def submit_tool_call_decisions(inputs):
-            user = inputs[user_state]
+            user:UserState = inputs[user_state]
+            messages = []
             for tool_call_json, decision_radio, reason_text in tool_call_components:
                 decision = inputs[decision_radio]
                 tc = inputs[tool_call_json]
                 reason = inputs[reason_text]
                 if decision =='deny':
-                    user.messages.append(chat_deny(reason, tc['id']))
-                    yield {messages_chatbot: to_chat_messages(user.messages)}
-            user.tool_calls = []
+                    messages.append({"type": "tool", "tool_call_id": tc['id'],"reason":reason})
+            if messages:
+                if not user.session_id:
+                    raise gr.Error('No active session')
+                user.messages.extend(client.chat_tools_deny(user.session_id, {"messages":messages})['messages'])
+                yield {messages_chatbot: to_chat_messages(user.messages)}
             yield {
                 tool_call_group: gr.update(visible=False), 
                 submit_button:gr.update(visible=False),
@@ -286,9 +202,11 @@ with gr.Blocks() as demo:
                 }
             for d in send(user, None):
                 yield d
-
-    hidden_accordion.render()
     with gr.Accordion('debug', open=False):
-        gr.Button('user_state').click(lambda x:print(f"====\n{json.dumps(x.messages, indent=2)}\n{json.dumps(x.tool_calls)}\n===="), inputs=[user_state])
+        user_state.render()
+        refresh_tool_call_trigger.render()
+        gr.Button('user_state').click(lambda x:print(f"====\n{json.dumps(x.messages, indent=2)}\n===="), inputs=[user_state])
+        gr.Button('send_empty').click(lambda us: client.chat_invoke(us.session_id, None, None), inputs=[user_state])
+
 
 demo.launch()
