@@ -100,9 +100,9 @@ with gr.Blocks() as demo:
             if event == 'error':
                 print(data['error'])
                 raise
-            elif event == 'message_start':
+            elif event == 'message-start':
                 user.messages.append({})
-            elif event == 'message_end':
+            elif event == 'message-end':
                 ...
             elif event is None:
                 update_message(user.messages[-1], data)

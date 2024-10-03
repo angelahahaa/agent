@@ -1,28 +1,43 @@
 
-from typing import (
-    Any,
-    List,
-    Literal,
-    Tuple,
-    Union,
-    cast,
-)
+from datetime import datetime
+from typing import Annotated, Any, List, Literal, Tuple, TypedDict, Union, cast
 
-from langchain_core.messages import AIMessage, AnyMessage, ToolCall, ToolMessage
-
-from typing import Annotated, Any, List, Literal, Tuple, TypedDict, Union
-
-from langchain_core.messages import ToolMessage
-from langgraph.graph import END
+from langchain_core.messages import (AIMessage, AnyMessage, ToolCall,
+                                     ToolMessage)
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
+from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from chatbot.architecture._multiagent import State
-from langgraph.prebuilt import ToolNode
+from langchain_core.runnables import (RunnableLambda, RunnablePassthrough)
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (AIMessage, ToolMessage)
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import (RunnableLambda, RunnablePassthrough)
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import AnyMessage, add_messages
+from langgraph.prebuilt import ToolNode
+from typing_extensions import TypedDict
 
 class State(TypedDict):
     messages: Annotated[List[AnyMessage], add_messages]
+
+def no_tools_agent_builder(llm: BaseChatModel):
+    """ agent with no tools, only default system prompt"""
+    builder = StateGraph(State)
+    agent = (RunnablePassthrough.assign(**{"time": lambda x: datetime.now()}) | ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant for Virtuos Games Company. "
+         "\nCurrent time: {time}."),
+        ("placeholder", "{messages}"),
+    ]) | llm | RunnableLambda(lambda x: {'messages': [x]}))
+    builder.add_edge(START, 'agent')
+    builder.add_node('agent', agent)
+    builder.add_edge('agent', END)
+    return builder
     
 def return_direct_condition(state:State) -> Literal['__end__','agent']:
     for message in state['messages'][::-1]:

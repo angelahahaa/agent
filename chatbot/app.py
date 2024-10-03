@@ -9,13 +9,14 @@ from langchain_openai import ChatOpenAI
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, AsyncIterator, Literal, TypedDict
+from typing import Annotated, Any, AsyncIterator, Literal, TypedDict
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 logger = logging.getLogger()
+logging.basicConfig(level=logging.INFO)
 import json
 from contextlib import asynccontextmanager
 from typing import Dict, List
@@ -23,7 +24,7 @@ from uuid import UUID, uuid4
 
 import jwt
 from annotated_types import Len
-from fastapi import (APIRouter, Body, Depends, FastAPI, File, HTTPException, Path, Request, Security, UploadFile,
+from fastapi import (APIRouter, Body, Cookie, Depends, FastAPI, File, HTTPException, Path, Query, Request, Security, UploadFile,
                      status)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -44,10 +45,11 @@ from typing_extensions import TypedDict
 
 from chatbot import config
 from chatbot.agents.all_multiagent import (IT_agent, get_all_tools, jira_agent, primary_agent)
-from chatbot.architecture.base import PartialToolNode, return_direct_condition
+from chatbot.architecture.base import PartialToolNode, return_direct_condition, no_tools_agent_builder
 from chatbot.architecture.multiagent import multi_agent_builder
 from chatbot.database.session_db import SessionInfo, SessionManager
 from chatbot.mocks import MockChat, mock_tool
+from fastapi.middleware.cors import CORSMiddleware
 
 MSG_EXCLUDE = {
     'additional_kwargs', 'response_metadata', 'example', 'invalid_tool_calls', 'usage_metadata', 'tool_call_chunks'
@@ -57,7 +59,7 @@ MSG_EXCLUDE = {
 
 
 class CreateSessionRequest(BaseModel):
-    agent_name: str
+    agent_name: str = Field(..., examples=['mock'])
 
 
 class ToolDenyMessage(BaseModel):
@@ -89,7 +91,7 @@ class ChatConfig(BaseModel):
 
 
 SessionId = Annotated[UUID, Path(..., examples=[uuid4()])]
-bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 # convert between JSON and python objects
 
@@ -111,12 +113,20 @@ def api_to_lc_message(message: ChatMessage | ToolDenyMessage) -> BaseMessage:
     raise ValueError(f"Unexpected message: {message}")
 
 
-def get_decoded_jwt(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)):
-    if credentials:
-        token = credentials.credentials
-        return jwt.decode(token, options={"verify_signature": False})
-    return {}
-
+def get_decoded_jwt(
+        bearer_token: HTTPAuthorizationCredentials|None = Security(bearer_scheme),
+        param_token: str = Query(None, alias="token")
+        ):
+    # Prioritize header-based authentication
+    if bearer_token:
+        token = bearer_token.credentials
+    # Fall back to cookie-based authentication if no header is provided
+    elif param_token:
+        token = param_token
+    else:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    
+    return jwt.decode(token, options={"verify_signature": False})
 
 DecodedJwt = Annotated[Dict, Depends(get_decoded_jwt)]
 
@@ -141,10 +151,10 @@ GraphInput = Annotated[Dict | None, Depends(get_graph_input)]
 # fns
 async def verify_input_for_state(agent: CompiledStateGraph, input: Dict | None, config: RunnableConfig):
     snapshot = await agent.aget_state(config=config)
-    next_is_tools = bool(snapshot.next)
-    if next_is_tools and input is not None:
+    has_next = bool(snapshot.next)
+    if has_next and input is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"input must be null.")
-    if not next_is_tools and input is None:
+    if not has_next and input is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"input must not be null.")
 
 
@@ -152,49 +162,24 @@ def lc_to_api_message(message: BaseMessage, include=None, exclude=MSG_EXCLUDE) -
     return message.dict(include=include, exclude=exclude)
 
 
-def sse_event(event: str | None = None, data: dict | None = None):
-    s = ''
-    if event:
-        s += f"event: {event}\n"
-    if data:
-        s += f"data: {json.dumps(data)}\n"
-    s += '\n'
-    return s.encode('utf-8')
-
-
-async def lc_to_api_stream_events(astream_events: AsyncIterator[StreamEvent]) -> AsyncIterator[bytes]:
-    """convert langgraph asteam events to SSE style stream events.
-    For AI message chunks with tool calls, we only stream the content, 
-    tool calls will only be streamed as a whole after the full message is generated.
+def sse_event(data: dict | str, event: str | None = None):
     """
-    try:
-        async for item in astream_events:
-            if item['event'] == "on_chat_model_start":
-                yield sse_event(event='message_start')
-            if item['event'] == "on_chat_model_stream":
-                message: AIMessageChunk = item['data']["chunk"]  # type: ignore
-                if message.content:
-                    data = lc_to_api_message(message, include={'content', 'id'})
-                    data.update({'type': 'ai'})
-                    yield sse_event(data=data)
-            elif item['event'] == "on_chat_model_end":
-                message: AIMessage = item['data']['output']  # type: ignore
-                data = lc_to_api_message(message, exclude=MSG_EXCLUDE | {'content'})
-                data.update({'type': 'ai'})
-                yield sse_event(data=data)
-                yield sse_event(event='message_end')
-            elif item['event'] == "on_tool_end":
-                message: ToolMessage = item['data']['output']  # type: ignore
-                yield sse_event(event='message_start')
-                yield sse_event(data=lc_to_api_message(message, exclude=MSG_EXCLUDE))
-                yield sse_event(event='message_end')
-    except EmptyInputError as e:
-        logger.error(e)
-        yield sse_event(event='error', data={"error": "input must not be null."})
-    except Exception as e:
-        logger.error(e)
-        yield sse_event(event='error', data={"error": f"{type(e).__name__}:{str(e)}"})
-
+    Create a Server-Sent Event string from an event and data.
+    
+    :param event: The name of the event. Can be None.
+    :param data: The data associated with the event. Can be None.
+    :return: A formatted Server-Sent Event string.
+    """
+    if isinstance(data, dict):
+        data = json.dumps(data)
+    lines = []
+    if event is not None:
+        lines.append(f"event: {event}")
+    # Data must be split into lines of 2048 characters or less
+    for i in range(0, len(data), 2048):
+        lines.append(f"data: {data[i:i+2048]}")
+    s = "\n".join(lines) + "\n\n"
+    return s.encode()
 
 # api
 class Agent(TypedDict):
@@ -209,21 +194,6 @@ async def get_agent(request: Request, session_id: SessionId):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id")
     agents: Dict[str, Agent] = request.app.state.agents
     return agents[session_info.agent_name]
-
-
-def no_tools_agent_builder(llm: BaseChatModel):
-    """ agent with no tools, only default system prompt"""
-    State = TypedDict('State', {'messages': Annotated[AnyMessage, add_messages]})
-    builder = StateGraph(State)
-    agent = (RunnablePassthrough.assign(**{"time": lambda x: datetime.now()}) | ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant for Virtuos Games Company. "
-         "\nCurrent time: {time}."),
-        ("placeholder", "{messages}"),
-    ]) | llm | RunnableLambda(lambda x: {'messages': [x]}))
-    builder.add_edge(START, 'agent')
-    builder.add_node('agent', agent)
-    builder.add_edge('agent', END)
-    return builder
 
 
 @asynccontextmanager
@@ -247,18 +217,22 @@ async def lifespan(app: FastAPI):
         await checkpointer.setup()
         # agents with no tools
         agents[f'gpt-4o-mini'] = Agent(
-            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o-mini')).compile(checkpointer=checkpointer),
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o-mini')).compile(checkpointer=checkpointer, interrupt_before=['agent']),
             tools=[],
         )
         agents[f'gpt-4o'] = Agent(
-            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o')).compile(checkpointer=checkpointer),
+            graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o')).compile(checkpointer=checkpointer, interrupt_before=['agent']),
+            tools=[],
+        )
+        agents[f'mock'] = Agent(
+            graph=no_tools_agent_builder(MockChat()).compile(checkpointer=checkpointer, interrupt_before=['agent']),
             tools=[],
         )
         # preset1
         assistants = [primary_agent, jira_agent, IT_agent]
         builder = multi_agent_builder(assistants)
         agents['agent-1'] = Agent(
-            graph=builder.compile(checkpointer=checkpointer, interrupt_before=['human']),
+            graph=builder.compile(checkpointer=checkpointer, interrupt_before=['tools'] + [assistant.name for assistant in assistants]),
             tools=get_all_tools(assistants),
         )
         # add agents to app state
@@ -271,6 +245,15 @@ async def lifespan(app: FastAPI):
 
 prefix = "/agent"
 app = FastAPI(root_path=prefix)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 router = APIRouter(lifespan=lifespan)
 
 
@@ -279,31 +262,107 @@ def get_available_agents(request: Request):
     return list(request.app.state.agents.keys())
 
 
-@router.post("/sessions/{session_id}/chat/stream")
-async def chat_stream(
+@router.post("/sessions/{session_id}/chat")
+async def chat(
     request: Request,
     username: Username,
     session_id: SessionId,
     config: ChatConfig = Body(default_factory=ChatConfig),
-    input: ChatInput | None = Body(None),
+    input: ChatInput = Body(...),
 ):
     agent = await get_agent(request, session_id)
     graph = agent['graph']
 
-    graph_input = None if input is None else {"messages": [api_to_lc_message(msg) for msg in input.messages]}
 
     config_dict = config.model_dump()
     config_dict['configurable']['username'] = username
     config_dict['configurable']['thread_id'] = str(session_id)
     graph_config = RunnableConfig(**config_dict)
 
-    await verify_input_for_state(graph, graph_input, graph_config)
+    # snapshot = await graph.aget_state(config=graph_config)
+    # if snapshot.next:
+    #     return JSONResponse(
+    #         status_code=status.HTTP_409_CONFLICT, 
+    #         content={"error":"The session is in a state where new chat content cannot be posted. Please use the GET /sessions/{session_id}/chat/stream or /sessions/{session_id}/chat/invoke endpoints to receive updates."})
 
+    graph_input = {"messages": [api_to_lc_message(msg) for msg in input.messages]}
     session_manager: SessionManager = app.state.session_manager
     await session_manager.update_session(session_id)
 
-    astream_events = graph.astream_events(graph_input, graph_config, version='v2')
-    return StreamingResponse(lc_to_api_stream_events(astream_events), media_type="text/event-stream")
+    await graph.ainvoke(graph_input, graph_config)
+    return JSONResponse({"status": "ok"})
+
+@router.get("/sessions/{session_id}/chat/stream")
+async def chat_stream(
+    request: Request,
+    username: Username,
+    session_id: SessionId,
+):
+    agent = await get_agent(request, session_id)
+    graph = agent['graph']
+
+    graph_config = RunnableConfig(configurable={"username":username, "thread_id":str(session_id)})
+
+    snapshot = await graph.aget_state(config=graph_config)
+    if not snapshot.next:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, 
+            content={"error":"The session is in a state to receive updates. Please use the POST /sessions/{session_id}/chat to post new chat content."})
+
+
+    async def generator() -> AsyncIterator[bytes]:
+        """convert langgraph asteam events to SSE style stream events.
+        For AI message chunks with tool calls, we only stream the content,
+        tool calls will only be streamed as a whole after the full message is generated.
+        """
+        disconnected = False
+        ai_message:AIMessageChunk | None = None
+        try:
+            logging.info('start')
+            async for item in graph.astream_events(None, graph_config, version='v2'):
+                disconnected = await request.is_disconnected()
+                if disconnected:
+                    logging.info('disconnected')
+                    break
+                if item['event'] == 'on_chain_end' and item['name'] == "_write":
+                    # ai message written to checkpoint, can flush
+                    ai_message = None
+                elif item['event'] == "on_chat_model_start":
+                    ai_message = AIMessageChunk(content='')
+                elif item['event'] == "on_chat_model_stream":
+                    ai_message_chunk: AIMessageChunk = item['data']["chunk"]  # type: ignore
+                    ai_message += ai_message_chunk # type: ignore
+                    # yield content if any
+                    if ai_message_chunk.content:
+                        data = lc_to_api_message(ai_message_chunk, include={'content', 'id'})
+                        data.update({'type': 'ai'})
+                        yield sse_event(data=data)
+                elif item['event'] == "on_chat_model_end":
+                    # yield tool calls if any
+                    if ai_message and ai_message.tool_calls:
+                        data = lc_to_api_message(ai_message_chunk, exclude=MSG_EXCLUDE | {'content'})
+                        data.update({'type': 'ai'})
+                        yield sse_event(data=data)
+                elif item['event'] == "on_tool_start":
+                    kwargs:Dict = item['data']['input']   # type: ignore
+                    yield sse_event(event='tool-start',data=kwargs)
+                elif item['event'] == "on_tool_end":
+                    tool_message: ToolMessage = item['data']['output']  # type: ignore
+                    yield sse_event(data=lc_to_api_message(tool_message, exclude=MSG_EXCLUDE))
+            if not disconnected:
+                yield sse_event(event='stream-end', data={})
+        except asyncio.CancelledError as e:
+            raise
+        except Exception as e:
+            logger.error(e)
+            yield sse_event(event='error', data={"error": f"{type(e).__name__}:{str(e)}"})
+        finally:
+            async def cleanup():
+                logger.warning(f"stream cancelled, cleaning up...")
+                await graph.aupdate_state(graph_config, {"messages":[ai_message]})
+            asyncio.shield(cleanup())
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 @router.post("/sessions/{session_id}/chat/invoke")
@@ -311,33 +370,28 @@ async def chat_invoke(
     request: Request,
     username: Username,
     session_id: SessionId,
-    config: ChatConfig = Body(default_factory=ChatConfig),
-    input: ChatInput | None = Body(None),
 ):
     agent = await get_agent(request, session_id)
     graph = agent['graph']
 
-    graph_input = None if input is None else {"messages": [api_to_lc_message(msg) for msg in input.messages]}
+    graph_config = RunnableConfig(configurable={"username":username, "thread_id":str(session_id)})
 
-    config_dict = config.model_dump()
-    config_dict['configurable']['username'] = username
-    config_dict['configurable']['thread_id'] = str(session_id)
-    graph_config = RunnableConfig(**config_dict)
-
-    await verify_input_for_state(graph, graph_input, graph_config)
-
-    session_manager: SessionManager = app.state.session_manager
-    await session_manager.update_session(session_id)
+    snapshot = await graph.aget_state(config=graph_config)
+    if not snapshot.next:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, 
+            content={"error":"The session is in a state to receive updates. Please use the POST /sessions/{session_id}/chat to post new chat content."})
 
     try:
-        state = await graph.ainvoke(input, graph_config)
-        messages = [lc_to_api_message(message) for message in state.get('messages', [])]
+        updates:List[Dict[str, Any]] = await graph.ainvoke(input, graph_config, stream_mode='updates')
+        messages = []
+        for update in updates:
+            for _, state in update.items():
+                messages.extend([lc_to_api_message(message) for message in state.get("messages", [])])
         return JSONResponse({"messages": messages})
-    except EmptyInputError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "input must not be null."})
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail={"error": f"{type(e).__name__}:{str(e)}"})
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            content={"error": f"{type(e).__name__}:{str(e)}"})
 
 
 @router.get("/sessions/{session_id}/chat/history")
