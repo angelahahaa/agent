@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 dotenv.load_dotenv('.env')
 
 import logging
-from typing import Annotated, Any, AsyncIterator, Literal, TypedDict
+from typing import Annotated, Any, AsyncIterator, Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -40,7 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, create_react_agent, tools_condition
-from pydantic import (AfterValidator, AnyHttpUrl, AnyUrl, BaseModel, Field, SkipValidation, model_validator)
+from pydantic import (AfterValidator, AnyHttpUrl, AnyUrl, BaseModel, Field, SkipValidation, field_validator, model_validator)
 from typing_extensions import TypedDict
 
 from chatbot import config
@@ -59,7 +59,7 @@ MSG_EXCLUDE = {
 
 
 class CreateSessionRequest(BaseModel):
-    agent_name: str = Field(..., examples=['mock'])
+    agent_name: str | None  = Field(default=None, examples=['mock'])
 
 
 class ToolDenyMessage(BaseModel):
@@ -73,6 +73,7 @@ class ToolDenyInput(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    id: str = Field(default_factory=lambda:str(uuid4()))
     type: Literal['human', 'system', 'tool']
     content: str | List[str | Dict] = Field(..., examples=['hi'])
 
@@ -99,9 +100,9 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def api_to_lc_message(message: ChatMessage | ToolDenyMessage) -> BaseMessage:
     if isinstance(message, ChatMessage):
         if message.type == 'human':
-            return HumanMessage(content=message.content, id=str(uuid4()))
+            return HumanMessage(content=message.content, id=message.id)
         if message.type == 'system':
-            return SystemMessage(content=message.content, id=str(uuid4()))
+            return SystemMessage(content=message.content, id=message.id)
     if isinstance(message, ToolDenyMessage):
         return ToolMessage(
             name="user_deny",
@@ -115,14 +116,17 @@ def api_to_lc_message(message: ChatMessage | ToolDenyMessage) -> BaseMessage:
 
 def get_decoded_jwt(
         bearer_token: HTTPAuthorizationCredentials|None = Security(bearer_scheme),
-        param_token: str = Query(None, alias="token")
+        # param_token: str = Query(None, alias="token"),
+        cookie_token: str = Cookie(None, alias="access_token")
         ):
     # Prioritize header-based authentication
     if bearer_token:
         token = bearer_token.credentials
     # Fall back to cookie-based authentication if no header is provided
-    elif param_token:
-        token = param_token
+    elif cookie_token:
+        token = cookie_token
+    # elif param_token:
+    #     token = param_token
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     
@@ -183,19 +187,31 @@ def sse_event(data: dict | str, event: str | None = None):
 
 # api
 class Agent(TypedDict):
+    name: str
     graph: CompiledStateGraph
     tools: List[BaseTool]
-
+    description: NotRequired[str]
+class AgentModel(BaseModel):
+    name: str
+    tools: List[str]
+    description: str
+    @staticmethod
+    def from_agent(agent:Agent):
+        return AgentModel(name=agent['name'],tools=[t.name for t in agent['tools']], description=agent.get('description',""))
 
 async def get_agent(request: Request, session_id: SessionId):
     session_manager: SessionManager = request.app.state.session_manager
-    session_info = await session_manager.get_session(session_id)
-    if not session_info:
+    info = await session_manager.get_session(session_id)
+    if not info:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id")
     agents: Dict[str, Agent] = request.app.state.agents
-    return agents[session_info.agent_name]
+    return agents[info.agent_name]
 
 
+TITLE_GENERATION_PROMPT = """
+Based on the conversation we've just had, please generate a concise and informative title that captures the main topic or objective of our discussion. The title should be 3 words or less. 
+
+Title:"""
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(config.TEMP_DIR, exist_ok=True)
@@ -204,7 +220,7 @@ async def lifespan(app: FastAPI):
     await session_manager.setup()
     app.state.session_manager = session_manager
     # initialise agents
-    agents: Dict[str, Agent] = dict()
+    agents: List[Agent] = []
     async with AsyncConnectionPool(
             conninfo=config.CONN_STRING,
             max_size=20,
@@ -216,27 +232,38 @@ async def lifespan(app: FastAPI):
         checkpointer = AsyncPostgresSaver(pool)  # type: ignore
         await checkpointer.setup()
         # agents with no tools
-        agents[f'gpt-4o-mini'] = Agent(
+        agents.extend([Agent(
+            name='gpt-4o-mini',
             graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o-mini')).compile(checkpointer=checkpointer, interrupt_before=['agent']),
             tools=[],
-        )
-        agents[f'gpt-4o'] = Agent(
+            description='For simple tasks.'
+        ),
+        Agent(
+            name='gpt-4o',
             graph=no_tools_agent_builder(ChatOpenAI(model='gpt-4o')).compile(checkpointer=checkpointer, interrupt_before=['agent']),
             tools=[],
-        )
-        agents[f'mock'] = Agent(
+            description='For daily tasks.'
+        ),
+        Agent(
+            name='mock',
             graph=no_tools_agent_builder(MockChat()).compile(checkpointer=checkpointer, interrupt_before=['agent']),
             tools=[],
-        )
+            description='Is dumb.'
+        )])
         # preset1
         assistants = [primary_agent, jira_agent, IT_agent]
         builder = multi_agent_builder(assistants)
-        agents['agent-1'] = Agent(
+        agents.append(Agent(
+            name='agent-1',
             graph=builder.compile(checkpointer=checkpointer, interrupt_before=['tools'] + [assistant.name for assistant in assistants]),
             tools=get_all_tools(assistants),
-        )
+            description='Has tools, can create jira ticket and raise FreshService tickets.'
+        ))
         # add agents to app state
-        app.state.agents = agents
+        app.state.agents = {agent['name']:agent for agent in agents}
+        # for title generation
+        prompt = ChatPromptTemplate.from_messages([("placeholder", "{messages}"),("human",TITLE_GENERATION_PROMPT)])
+        app.state.title_generation_runnable = prompt | ChatOpenAI(model='gpt-4o-mini')
         yield
 
     # Clean up
@@ -248,7 +275,7 @@ app = FastAPI(root_path=prefix)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://localhost:8000","*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -258,8 +285,8 @@ router = APIRouter(lifespan=lifespan)
 
 
 @router.get("/agents")
-def get_available_agents(request: Request):
-    return list(request.app.state.agents.keys())
+def get_available_agents(request: Request) -> List[AgentModel]:
+    return [AgentModel.from_agent(agent) for agent in request.app.state.agents.values()]
 
 
 @router.post("/sessions/{session_id}/chat")
@@ -292,6 +319,27 @@ async def chat(
     await graph.ainvoke(graph_input, graph_config)
     return JSONResponse({"status": "ok"})
 
+@router.post("/sessions/{session_id}/generate-title")
+async def generate_title(
+    request: Request,
+    session_id:SessionId,
+):
+    """ This does not register the title to session db, call PUT /sessions/{session_id}/chat/title to set it in the database.
+    Defaults to "New Chat" if no conversation history exists.
+    """
+    agent = await get_agent(request, session_id)
+    snapshot = await agent['graph'].aget_state(config=RunnableConfig(configurable={'thread_id': str(session_id)}))
+    messages = snapshot.values.get('messages', [])
+    if not messages:
+        return "Empty Conversation"
+    runnable = request.app.state.title_generation_runnable
+    message = await runnable.ainvoke({'messages':messages})
+    title:str = message.content
+    title = title.strip().strip("\"")
+    return title
+
+
+
 @router.get("/sessions/{session_id}/chat/stream")
 async def chat_stream(
     request: Request,
@@ -318,7 +366,6 @@ async def chat_stream(
         disconnected = False
         ai_message:AIMessageChunk | None = None
         try:
-            logging.info('start')
             async for item in graph.astream_events(None, graph_config, version='v2'):
                 disconnected = await request.is_disconnected()
                 if disconnected:
@@ -352,14 +399,15 @@ async def chat_stream(
             if not disconnected:
                 yield sse_event(event='stream-end', data={})
         except asyncio.CancelledError as e:
+            logger.warning(f"stream cancelled...")
             raise
         except Exception as e:
             logger.error(e)
             yield sse_event(event='error', data={"error": f"{type(e).__name__}:{str(e)}"})
         finally:
             async def cleanup():
-                logger.warning(f"stream cancelled, cleaning up...")
-                await graph.aupdate_state(graph_config, {"messages":[ai_message]})
+                if (ai_message):
+                    await graph.aupdate_state(graph_config, {"messages":[ai_message]})
             asyncio.shield(cleanup())
 
     return StreamingResponse(generator(), media_type="text/event-stream")
@@ -435,18 +483,34 @@ async def create_session(
 ) -> SessionInfo:
     session_manager: SessionManager = app.state.session_manager
     agents: Dict[str, Agent] = request.app.state.agents
+    body.agent_name = body.agent_name or 'mock' # default model
     if not body.agent_name in agents:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Invalid agent_name, must be one of: {list(agents.keys())}")
-    session_info = await session_manager.create_session(username, body.agent_name)
-    return session_info
+                            detail=f"Invalid agent_name ({body.agent_name}), must be one of: {list(agents.keys())}")
+    info = await session_manager.create_session(username, body.agent_name)
+    return info
 
+
+class UpdateSessionModel(BaseModel):
+    title:str = Field(..., examples=['New Title'])
+@router.patch("/sessions/{session_id}")
+async def update_title(
+    request: Request,
+    session_id:SessionId,
+    body: UpdateSessionModel,
+) -> SessionInfo:
+    session_manager: SessionManager = request.app.state.session_manager
+    info = await session_manager.update_session(session_id, title=body.title)
+    if info is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id")
+    return info
 
 @router.get("/sessions")
 async def get_sessions(username: Username) -> List[SessionInfo]:
     session_manager: SessionManager = app.state.session_manager
-    session_infos = await session_manager.get_sessions(username)
-    return session_infos
+    infos = await session_manager.get_sessions(username)
+    infos.sort(key=lambda info: info.last_modified, reverse=True)
+    return infos
 
 
 @router.delete("/sessions/{session_id}")
